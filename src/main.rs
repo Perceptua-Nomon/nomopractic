@@ -1,10 +1,10 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
-mod config;
-mod hat;
-mod ipc;
-mod reset;
+use nomopractic::config::Config;
 
 /// nomopractic — low-latency HAT hardware daemon for the nomon fleet.
 #[derive(Parser)]
@@ -17,5 +17,38 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    todo!("Phase 1: parse CLI, load config, init tracing, start IPC listener")
+    let cli = Cli::parse();
+
+    let config = Config::load(&cli.config)?;
+
+    // Init tracing with level from config, overridable by RUST_LOG.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
+        )
+        .init();
+
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        config_path = %cli.config.display(),
+        i2c_bus = config.i2c_bus,
+        hat_address = format!("0x{:02x}", config.hat_address),
+        "nomopractic starting"
+    );
+
+    let config = Arc::new(config);
+
+    // Shutdown signal — set to true on ctrl-c.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Spawn ctrl-c handler.
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for ctrl-c");
+        info!("shutdown signal received");
+        let _ = shutdown_tx.send(true);
+    });
+
+    nomopractic::ipc::serve(config, shutdown_rx).await
 }

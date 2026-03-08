@@ -22,31 +22,33 @@ responds to `health` requests. No hardware access yet.
 - [x] Architecture & roadmap docs
 
 ### 1.2 — Configuration
-- [ ] `config.rs`: Load TOML config file with serde
-- [ ] Environment variable overrides (`NOMON_HAT_*`)
-- [ ] CLI argument parsing (clap): `--config <path>`
-- [ ] Validation: reject invalid bus/address/port values
-- [ ] Unit tests for config loading, defaults, overrides
+- [x] `config.rs`: Load TOML config file with serde
+- [x] Environment variable overrides (`NOMON_HAT_*`)
+- [x] CLI argument parsing (clap): `--config <path>`
+- [x] Validation: reject invalid log_level, zero TTL/watchdog
+- [x] Unit tests: 9 tests (defaults, file load, env overrides, validation errors)
 
 ### 1.3 — Tracing & Logging
-- [ ] `tracing-subscriber` init with `env-filter`
-- [ ] Log level from config / `RUST_LOG` env var
-- [ ] Structured fields in log output (JSON optional)
+- [x] `tracing-subscriber` init with `env-filter`
+- [x] Log level from config / `RUST_LOG` env var
+- [x] Structured fields in log output
 
 ### 1.4 — IPC Listener
-- [ ] `ipc/mod.rs`: Tokio `UnixListener` on configured socket path
-- [ ] Socket permissions (mode `0660`, group `nomon`)
-- [ ] Per-client task spawning with graceful shutdown
-- [ ] Read NDJSON lines (max 4096 bytes), parse `Request`
-- [ ] Write `Response` + newline back to client
-- [ ] Client disconnect cleanup (log, release resources)
-- [ ] Integration test: connect, send health, verify response
+- [x] `ipc/mod.rs`: Tokio `UnixListener` on configured socket path
+- [x] Socket permissions (mode `0660`)
+- [x] Per-client task spawning with graceful shutdown (ctrl-c)
+- [x] Read NDJSON lines (max 4096 bytes), parse `Request`
+- [x] Write `Response` + newline back to client
+- [x] Client disconnect cleanup (log)
+- [x] Integration tests: 5 tests (health, unknown method, malformed JSON,
+      multiple requests, concurrent clients)
 
 ### 1.5 — Health Method
-- [ ] `ipc/handler.rs`: Route `health` method
-- [ ] Response: `schema_version`, `status`, `version`, `uptime_s`, `hat_address`, `i2c_bus`
-- [ ] Error response for unknown methods (`UNKNOWN_METHOD`)
-- [ ] Error response for malformed JSON
+- [x] `ipc/handler.rs`: Route `health` method with uptime tracking
+- [x] Response: `schema_version`, `status`, `version`, `uptime_s`, `hat_address`, `i2c_bus`
+- [x] Error response for unknown methods (`UNKNOWN_METHOD`)
+- [x] Error response for malformed JSON (`INVALID_PARAMS`)
+- [x] Unit tests: 5 tests (health, unknown method, malformed, missing field, default params)
 
 ### Phase 1 Exit Criteria
 - `cargo test` — all tests pass (no hardware required)
@@ -191,10 +193,10 @@ hardware interaction.
 
 ## Current Status
 
-| Phase | Name | Status |
-|-------|------|--------|
-| 1 | Foundation & IPC Scaffold | 🔶 In Progress (1.1 complete) |
-| 2 | I2C & Battery Voltage | 🔲 Not Started |
-| 3 | PWM & Servo Control | 🔲 Not Started |
-| 4 | GPIO & MCU Reset | 🔲 Not Started |
-| 5 | Hardening & Deployment | 🔲 Not Started |
+| Phase | Name | Status | Tests |
+|-------|------|--------|-------|
+| 1 | Foundation & IPC Scaffold | ✅ Complete | 19 |
+| 2 | I2C & Battery Voltage | 🔲 Not Started | — |
+| 3 | PWM & Servo Control | 🔲 Not Started | — |
+| 4 | GPIO & MCU Reset | 🔲 Not Started | — |
+| 5 | Hardening & Deployment | 🔲 Not Started | — |
