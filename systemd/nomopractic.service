@@ -1,0 +1,16 @@
+[Unit]
+Description=nomon HAT hardware daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=nomon
+ExecStartPre=/bin/mkdir -p /run/nomopractic
+ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
+Restart=on-failure
+RestartSec=2s
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
