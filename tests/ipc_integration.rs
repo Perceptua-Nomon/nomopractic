@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
@@ -229,5 +229,27 @@ async fn get_battery_voltage_over_socket() {
 
     let _ = shutdown_tx.send(true);
     drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn oversized_message_closes_connection() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let mut stream = UnixStream::connect(&config.socket_path).await.unwrap();
+
+    // Send a message that is 1 byte longer than the 4096-byte limit.
+    let big_msg = "x".repeat(4097);
+    stream.write_all(big_msg.as_bytes()).await.unwrap();
+    stream.write_all(b"\n").await.unwrap();
+    stream.flush().await.unwrap();
+
+    // The server should close the connection; a subsequent read must return 0.
+    // Any non-zero read buffer is sufficient; we only need to observe EOF (n == 0).
+    let mut buf = vec![0u8; 16];
+    let n = stream.read(&mut buf).await.unwrap();
+    assert_eq!(n, 0, "server should close connection on oversized message");
+
+    let _ = shutdown_tx.send(true);
     let _ = handle.await;
 }
