@@ -120,7 +120,7 @@ async fn handle_client(
             _ = shutdown_changed(shutdown) => None,
         };
 
-        // Drop `bounded` now so `lines` is no longer mutably borrowed and can
+        // Drop `bounded` now so `reader` is no longer mutably borrowed and can
         // be passed to `drain_line` below.
         drop(bounded);
 
@@ -133,13 +133,13 @@ async fn handle_client(
                 info!("client disconnected");
                 break;
             }
-            Some(Ok(n)) if n > MAX_MESSAGE_LEN => {
+            Some(Ok(n)) if n > MAX_MESSAGE_LEN && !buf.ends_with('\n') => {
+                // take() hit its limit before the newline; the content length
+                // exceeds MAX_MESSAGE_LEN (the trailing \n is not included in
+                // the limit).  Discard the rest of the line so the next read
+                // starts at a clean message boundary.
                 warn!(bytes = n, "message exceeds max size, dropping");
-                // take() hit its limit before the newline; discard the rest of
-                // the line so the next read starts at a clean message boundary.
-                if !buf.ends_with('\n')
-                    && let Err(e) = drain_line(&mut reader).await
-                {
+                if let Err(e) = drain_line(&mut reader).await {
                     warn!(error = %e, "drain error after oversized message");
                     break;
                 }
