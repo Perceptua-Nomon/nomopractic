@@ -5,6 +5,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use nomopractic::config::Config;
+use nomopractic::hat::i2c::{Hat, RppalI2c};
 
 /// nomopractic — low-latency HAT hardware daemon for the nomon fleet.
 #[derive(Parser)]
@@ -36,6 +37,11 @@ async fn main() -> anyhow::Result<()> {
         "nomopractic starting"
     );
 
+    let hat = Arc::new(Hat::new(
+        RppalI2c::open(config.i2c_bus).map_err(|e| anyhow::anyhow!("{e}"))?,
+        config.hat_address,
+    ));
+
     let config = Arc::new(config);
 
     // Shutdown signal — set to true on ctrl-c.
@@ -50,5 +56,5 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    nomopractic::ipc::serve(config, shutdown_rx).await
+    nomopractic::ipc::serve(config, hat, shutdown_rx).await
 }

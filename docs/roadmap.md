@@ -69,27 +69,27 @@ responds to `health` requests. No hardware access yet.
 hardware interaction.
 
 ### 2.1 — I2C Helpers
-- [ ] `hat/i2c.rs`: Open I2C bus via rppal
-- [ ] `read_register(addr, reg, buf)` helper
-- [ ] `write_register(addr, reg, data)` helper
-- [ ] Shared `Hat` struct holding `rppal::i2c::I2c` behind `tokio::sync::Mutex`
-- [ ] Unit tests with mock I2C (trait-based abstraction)
+- [x] `hat/i2c.rs`: Open I2C bus via rppal
+- [x] `read_register(addr, reg, buf)` helper
+- [x] `write_register(addr, reg, data)` helper
+- [x] Shared `Hat` struct holding `rppal::i2c::I2c` behind `tokio::sync::Mutex`
+- [x] Unit tests with mock I2C (trait-based abstraction)
 
 ### 2.2 — ADC Read
-- [ ] `hat/adc.rs`: Write command byte, read 2-byte result
-- [ ] Channel validation (A0–A7)
-- [ ] Error handling for I2C failures
+- [x] `hat/adc.rs`: Write command byte, read 2-byte result
+- [x] Channel validation (A0–A7)
+- [x] Error handling for I2C failures
 
 ### 2.3 — Battery Voltage
-- [ ] `hat/battery.rs`: Read ADC channel A4
-- [ ] Scaling: `voltage_v = raw_adc × 3`
-- [ ] `get_battery_voltage` IPC method wired up in handler
-- [ ] Unit test: mock ADC → verify voltage calculation
+- [x] `hat/battery.rs`: Read ADC channel A4
+- [x] Scaling: `voltage_v = raw_adc × 3`
+- [x] `get_battery_voltage` IPC method wired up in handler
+- [x] Unit test: mock ADC → verify voltage calculation
 
 ### Phase 2 Exit Criteria
-- Battery voltage readable via IPC
-- I2C errors returned as `HARDWARE_ERROR` to client
-- All tests pass without hardware (mocked I2C)
+- [x] Battery voltage readable via IPC
+- [x] I2C errors returned as `HARDWARE_ERROR` to client
+- [x] All tests pass without hardware (mocked I2C)
 
 ---
 
@@ -196,7 +196,7 @@ hardware interaction.
 | Phase | Name | Status | Tests |
 |-------|------|--------|-------|
 | 1 | Foundation & IPC Scaffold | ✅ Complete | 19 |
-| 2 | I2C & Battery Voltage | 🔲 Not Started | — |
+| 2 | I2C & Battery Voltage | ✅ Complete | 31 |
 | 3 | PWM & Servo Control | 🔲 Not Started | — |
 | 4 | GPIO & MCU Reset | 🔲 Not Started | — |
 | 5 | Hardening & Deployment | 🔲 Not Started | — |

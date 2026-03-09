@@ -11,6 +11,7 @@ use tokio::net::UnixListener;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::hat::i2c::Hat;
 use handler::Handler;
 
 /// Maximum NDJSON message size (bytes).
@@ -19,6 +20,7 @@ const MAX_MESSAGE_LEN: usize = 4096;
 /// Start the IPC listener. Runs until the `shutdown` signal resolves.
 pub async fn serve(
     config: Arc<Config>,
+    hat: Arc<Hat>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let sock_path = &config.socket_path;
@@ -37,7 +39,7 @@ pub async fn serve(
     set_socket_permissions(sock_path, config.socket_mode)?;
     info!(path = %sock_path.display(), "IPC listener started");
 
-    let handler = Arc::new(Handler::new(Arc::clone(&config)));
+    let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat)));
 
     loop {
         let mut shutdown_for_select = shutdown.clone();
@@ -104,7 +106,7 @@ async fn handle_client(
                         continue;
                     }
                     Ok(_) => {
-                        let response_json = handler.dispatch(buf.trim_end());
+                        let response_json = handler.dispatch(buf.trim_end()).await;
                         writer.write_all(response_json.as_bytes()).await?;
                         writer.write_all(b"\n").await?;
                         writer.flush().await?;
