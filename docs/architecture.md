@@ -113,7 +113,7 @@ HatClient (Python)
   → hat::adc::read_channel(A4)
   → hat::i2c::write + read (0x14)
   → raw_adc × 3 = voltage_v
-  → {"id":"2","ok":true,"result":{"voltage_v":7.42,"raw_adc":24700}}
+  → {"id":"2","ok":true,"result":{"voltage_v":7.42}}
 ```
 
 ### Servo TTL Watchdog
