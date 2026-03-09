@@ -68,19 +68,25 @@ impl Config {
             Self::default()
         };
 
-        config.apply_env_overrides();
+        config.apply_env_overrides(|k| env::var(k));
         config.validate()?;
         Ok(config)
     }
 
     /// Override fields from `NOMON_HAT_*` environment variables.
-    fn apply_env_overrides(&mut self) {
-        if let Ok(v) = env::var("NOMON_HAT_I2C_BUS")
+    ///
+    /// Accepts a `get_env` function so callers can inject a deterministic
+    /// accessor in tests instead of mutating the process environment.
+    fn apply_env_overrides<F>(&mut self, get_env: F)
+    where
+        F: for<'a> Fn(&'a str) -> Result<String, env::VarError>,
+    {
+        if let Ok(v) = get_env("NOMON_HAT_I2C_BUS")
             && let Ok(n) = v.parse()
         {
             self.i2c_bus = n;
         }
-        if let Ok(v) = env::var("NOMON_HAT_ADDRESS") {
+        if let Ok(v) = get_env("NOMON_HAT_ADDRESS") {
             // Accept "0x14" or "20" decimal.
             let n = if let Some(hex) = v.strip_prefix("0x") {
                 u8::from_str_radix(hex, 16).ok()
@@ -91,23 +97,23 @@ impl Config {
                 self.hat_address = n;
             }
         }
-        if let Ok(v) = env::var("NOMON_HAT_SOCKET_PATH") {
+        if let Ok(v) = get_env("NOMON_HAT_SOCKET_PATH") {
             self.socket_path = PathBuf::from(v);
         }
-        if let Ok(v) = env::var("NOMON_HAT_SOCKET_MODE")
+        if let Ok(v) = get_env("NOMON_HAT_SOCKET_MODE")
             && let Ok(n) = u32::from_str_radix(&v, 8)
         {
             self.socket_mode = n;
         }
-        if let Ok(v) = env::var("NOMON_HAT_LOG_LEVEL") {
+        if let Ok(v) = get_env("NOMON_HAT_LOG_LEVEL") {
             self.log_level = v;
         }
-        if let Ok(v) = env::var("NOMON_HAT_SERVO_DEFAULT_TTL_MS")
+        if let Ok(v) = get_env("NOMON_HAT_SERVO_DEFAULT_TTL_MS")
             && let Ok(n) = v.parse()
         {
             self.servo_default_ttl_ms = n;
         }
-        if let Ok(v) = env::var("NOMON_HAT_WATCHDOG_POLL_MS")
+        if let Ok(v) = get_env("NOMON_HAT_WATCHDOG_POLL_MS")
             && let Ok(n) = v.parse()
         {
             self.watchdog_poll_ms = n;
@@ -227,18 +233,12 @@ servo_default_ttl_ms = 1000
     #[test]
     fn env_overrides_apply() {
         let mut config = Config::default();
-        // SAFETY: test is single-threaded; no other threads reading env vars.
-        unsafe {
-            env::set_var("NOMON_HAT_I2C_BUS", "3");
-            env::set_var("NOMON_HAT_ADDRESS", "0x20");
-            env::set_var("NOMON_HAT_LOG_LEVEL", "debug");
-        }
-        config.apply_env_overrides();
-        unsafe {
-            env::remove_var("NOMON_HAT_I2C_BUS");
-            env::remove_var("NOMON_HAT_ADDRESS");
-            env::remove_var("NOMON_HAT_LOG_LEVEL");
-        }
+        config.apply_env_overrides(|key| match key {
+            "NOMON_HAT_I2C_BUS" => Ok("3".into()),
+            "NOMON_HAT_ADDRESS" => Ok("0x20".into()),
+            "NOMON_HAT_LOG_LEVEL" => Ok("debug".into()),
+            _ => Err(env::VarError::NotPresent),
+        });
 
         assert_eq!(config.i2c_bus, 3);
         assert_eq!(config.hat_address, 0x20);
