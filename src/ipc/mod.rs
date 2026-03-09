@@ -7,7 +7,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{error, info, warn};
 
@@ -100,24 +100,28 @@ async fn handle_client(
     handler: Arc<Handler>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader);
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
     let mut buf = String::new();
 
     info!("client connected");
 
     loop {
         buf.clear();
+        // Limit reading to MAX_MESSAGE_LEN + 1 bytes so the size constraint is
+        // enforced during the read, not after. A named binding is required so the
+        // Take<&mut BufReader> lives for the duration of the select! call.
+        let mut limited = (&mut reader).take((MAX_MESSAGE_LEN + 1) as u64);
         tokio::select! {
-            result = lines.read_line(&mut buf) => {
+            result = limited.read_line(&mut buf) => {
                 match result {
                     Ok(0) => {
                         info!("client disconnected");
                         break;
                     }
-                    Ok(n) if n > MAX_MESSAGE_LEN => {
-                        warn!(bytes = n, "message exceeds max size, dropping");
-                        continue;
+                    Ok(n) if n == MAX_MESSAGE_LEN + 1 => {
+                        warn!(bytes = n, "message exceeds max size, closing connection");
+                        break;
                     }
                     Ok(_) => {
                         let response_json = handler.dispatch(buf.trim_end()).await;
