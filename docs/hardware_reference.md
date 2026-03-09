@@ -50,7 +50,7 @@ prescaler = CLOCK_HZ / (SERVO_FREQ × PERIOD) - 1
 | Parameter | Value |
 |-----------|-------|
 | Battery channel | A4 |
-| Command byte | `0x13` |
+| Command byte | `0x14` |
 | Read size | 2 bytes (big-endian) |
 | Scaling | `voltage = raw × 3` |
 
