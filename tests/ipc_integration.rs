@@ -289,6 +289,35 @@ async fn get_battery_voltage_over_socket() {
 }
 
 #[tokio::test]
+async fn oversized_message_is_dropped_connection_remains_usable() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Send a message that exceeds MAX_MESSAGE_LEN (4096 bytes).
+    // The server must reject it without echoing a response and without
+    // terminating the connection, so the following valid request still works.
+    let oversized = "x".repeat(4097);
+    {
+        let inner = reader.get_mut();
+        inner.write_all(oversized.as_bytes()).await.unwrap();
+        inner.write_all(b"\n").await.unwrap();
+        inner.flush().await.unwrap();
+    }
+
+    // A valid request after the oversized one must still succeed.
+    let resp = request(
+        &mut reader,
+        r#"{"id":"after_big","method":"health","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "after_big");
+    assert_eq!(resp["ok"], true);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
 async fn oversized_message_closes_connection() {
     let (config, shutdown_tx, handle, _dir) = start_test_server().await;
 

@@ -108,41 +108,78 @@ async fn handle_client(
 
     loop {
         buf.clear();
-        // Limit reading to MAX_MESSAGE_LEN + 1 bytes so the size constraint is
-        // enforced during the read, not after. A named binding is required so the
-        // Take<&mut BufReader> lives for the duration of the select! call.
-        let mut limited = (&mut reader).take((MAX_MESSAGE_LEN + 1) as u64);
-        tokio::select! {
-            result = limited.read_line(&mut buf) => {
-                match result {
-                    Ok(0) => {
-                        info!("client disconnected");
-                        break;
-                    }
-                    Ok(n) if n == MAX_MESSAGE_LEN + 1 => {
-                        warn!(bytes = n, "message exceeds max size, closing connection");
-                        break;
-                    }
-                    Ok(_) => {
-                        let response_json = handler.dispatch(buf.trim_end()).await;
-                        writer.write_all(response_json.as_bytes()).await?;
-                        writer.write_all(b"\n").await?;
-                        writer.flush().await?;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "read error");
+
+        // Bind the bounded reader to a local so the temporary lives long enough
+        // for `select!` to poll it.  Allocation is capped at MAX_MESSAGE_LEN + 1
+        // bytes per call, so a client sending a very long line cannot force an
+        // arbitrarily large heap allocation before the size check runs.
+        let mut bounded = (&mut lines).take((MAX_MESSAGE_LEN + 1) as u64);
+
+        let result = tokio::select! {
+            r = bounded.read_line(&mut buf) => Some(r),
+            _ = shutdown_changed(shutdown) => None,
+        };
+
+        // Drop `bounded` now so `lines` is no longer mutably borrowed and can
+        // be passed to `drain_line` below.
+        drop(bounded);
+
+        match result {
+            None => {
+                info!("client session interrupted by shutdown");
+                break;
+            }
+            Some(Ok(0)) => {
+                info!("client disconnected");
+                break;
+            }
+            Some(Ok(n)) if n > MAX_MESSAGE_LEN => {
+                warn!(bytes = n, "message exceeds max size, dropping");
+                // take() hit its limit before the newline; discard the rest of
+                // the line so the next read starts at a clean message boundary.
+                if !buf.ends_with('\n') {
+                    if let Err(e) = drain_line(&mut lines).await {
+                        warn!(error = %e, "drain error after oversized message");
                         break;
                     }
                 }
             }
-            _ = shutdown_changed(shutdown) => {
-                info!("client session interrupted by shutdown");
+            Some(Ok(_)) => {
+                let response_json = handler.dispatch(buf.trim_end()).await;
+                writer.write_all(response_json.as_bytes()).await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+            }
+            Some(Err(e)) => {
+                warn!(error = %e, "read error");
                 break;
             }
         }
     }
 
     Ok(())
+}
+
+/// Discard bytes from `reader` up to and including the next `\n` (or EOF).
+///
+/// Uses `fill_buf`/`consume` so no additional heap allocation is needed; the
+/// discard is done entirely within the `BufReader`'s existing internal buffer.
+async fn drain_line<R>(reader: &mut R) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok(()); // EOF
+        }
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(());
+        }
+        let n = buf.len();
+        reader.consume(n);
+    }
 }
 
 #[cfg(unix)]
