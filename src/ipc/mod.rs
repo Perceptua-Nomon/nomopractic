@@ -113,14 +113,14 @@ async fn handle_client(
         // for `select!` to poll it.  Allocation is capped at MAX_MESSAGE_LEN + 1
         // bytes per call, so a client sending a very long line cannot force an
         // arbitrarily large heap allocation before the size check runs.
-        let mut bounded = (&mut lines).take((MAX_MESSAGE_LEN + 1) as u64);
+        let mut bounded = (&mut reader).take((MAX_MESSAGE_LEN + 1) as u64);
 
         let result = tokio::select! {
             r = bounded.read_line(&mut buf) => Some(r),
             _ = shutdown_changed(shutdown) => None,
         };
 
-        // Drop `bounded` now so `lines` is no longer mutably borrowed and can
+        // Drop `bounded` now so `reader` is no longer mutably borrowed and can
         // be passed to `drain_line` below.
         drop(bounded);
 
@@ -133,15 +133,15 @@ async fn handle_client(
                 info!("client disconnected");
                 break;
             }
-            Some(Ok(n)) if n > MAX_MESSAGE_LEN => {
+            Some(Ok(n)) if n > MAX_MESSAGE_LEN && !buf.ends_with('\n') => {
+                // take() hit its limit before the newline; the content length
+                // exceeds MAX_MESSAGE_LEN (the trailing \n is not included in
+                // the limit).  Discard the rest of the line so the next read
+                // starts at a clean message boundary.
                 warn!(bytes = n, "message exceeds max size, dropping");
-                // take() hit its limit before the newline; discard the rest of
-                // the line so the next read starts at a clean message boundary.
-                if !buf.ends_with('\n') {
-                    if let Err(e) = drain_line(&mut lines).await {
-                        warn!(error = %e, "drain error after oversized message");
-                        break;
-                    }
+                if let Err(e) = drain_line(&mut reader).await {
+                    warn!(error = %e, "drain error after oversized message");
+                    break;
                 }
             }
             Some(Ok(_)) => {

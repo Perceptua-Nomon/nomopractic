@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
@@ -318,23 +318,66 @@ async fn oversized_message_is_dropped_connection_remains_usable() {
 
     let _ = shutdown_tx.send(true);
     drop(reader);
-async fn oversized_message_closes_connection() {
+    let _ = handle.await;
+}
+
+/// MAX_MESSAGE_LEN boundary: a message whose content is exactly 4096 bytes
+/// (excluding the framing newline) must be accepted and produce a response.
+#[tokio::test]
+async fn message_at_max_size_boundary_is_accepted() {
     let (config, shutdown_tx, handle, _dir) = start_test_server().await;
 
-    let mut stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
 
-    // Send a message that is 1 byte longer than the 4096-byte limit.
-    let big_msg = "x".repeat(4097);
-    stream.write_all(big_msg.as_bytes()).await.unwrap();
-    stream.write_all(b"\n").await.unwrap();
-    stream.flush().await.unwrap();
+    // Build a health request whose total JSON length is exactly 4096 bytes.
+    // Base template without the id value: {"id":"","method":"health","params":{}}
+    // That is 38 bytes; fill the id field to bring the total to 4096.
+    let base = r#"{"id":"","method":"health","params":{}}"#;
+    let id_padding = "a".repeat(4096 - base.len());
+    let msg = format!(r#"{{"id":"{id_padding}","method":"health","params":{{}}}}"#);
+    assert_eq!(msg.len(), 4096, "test message must be exactly 4096 bytes");
 
-    // The server should close the connection; a subsequent read must return 0.
-    // Any non-zero read buffer is sufficient; we only need to observe EOF (n == 0).
-    let mut buf = vec![0u8; 16];
-    let n = stream.read(&mut buf).await.unwrap();
-    assert_eq!(n, 0, "server should close connection on oversized message");
+    let resp = request(&mut reader, &msg).await;
+
+    // The server must respond (not drop the message).
+    assert_eq!(resp["ok"], true);
 
     let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+/// MAX_MESSAGE_LEN boundary: a message whose content is exactly 4097 bytes
+/// (one byte over the limit, excluding the framing newline) must be rejected
+/// without closing the connection.
+#[tokio::test]
+async fn message_one_over_max_size_is_rejected() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // 4097-byte payload — one byte over MAX_MESSAGE_LEN.
+    let one_over = "x".repeat(4097);
+    {
+        let inner = reader.get_mut();
+        inner.write_all(one_over.as_bytes()).await.unwrap();
+        inner.write_all(b"\n").await.unwrap();
+        inner.flush().await.unwrap();
+    }
+
+    // The server must not close the connection; a subsequent valid request works.
+    let resp = request(
+        &mut reader,
+        r#"{"id":"after_one_over","method":"health","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "after_one_over");
+    assert_eq!(resp["ok"], true);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
     let _ = handle.await;
 }
