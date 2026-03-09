@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let hat = Arc::new(Hat::new(
-        RppalI2c::open(config.i2c_bus).map_err(|e| anyhow::anyhow!("{e}"))?,
+        RppalI2c::open(config.i2c_bus).map_err(anyhow::Error::new)?,
         config.hat_address,
     ));
 
