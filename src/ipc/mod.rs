@@ -3,6 +3,7 @@
 pub mod handler;
 pub mod schema;
 
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -25,9 +26,22 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let sock_path = &config.socket_path;
 
-    // Remove stale socket file if it exists.
-    if sock_path.exists() {
-        std::fs::remove_file(sock_path)?;
+    // Remove stale socket file if it exists, but only if it is a Unix socket.
+    // symlink_metadata is used so that a symlink at the path is never followed;
+    // a symlink (even one pointing to a socket) is rejected to prevent an
+    // attacker-controlled path from causing deletion of an arbitrary file.
+    match std::fs::symlink_metadata(sock_path) {
+        Ok(meta) if meta.file_type().is_socket() => {
+            std::fs::remove_file(sock_path)?;
+        }
+        Ok(_) => {
+            anyhow::bail!(
+                "socket path {} exists but is not a Unix socket; refusing to remove",
+                sock_path.display()
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
 
     // Ensure parent directory exists.
@@ -86,8 +100,8 @@ async fn handle_client(
     handler: Arc<Handler>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader);
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
     let mut buf = String::new();
 
     info!("client connected");

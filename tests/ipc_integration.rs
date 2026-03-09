@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
@@ -210,6 +210,62 @@ async fn multiple_concurrent_clients() {
 }
 
 #[tokio::test]
+async fn serve_rejects_regular_file_at_socket_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("not_a_socket.sock");
+
+    // Create a regular file at the socket path.
+    std::fs::write(&sock_path, b"regular file content").unwrap();
+
+    let mut config = Config::default();
+    config.socket_path = sock_path;
+    let config = Arc::new(config);
+
+    let hat = Arc::new(nomopractic::hat::i2c::Hat::new(
+        MockI2c::new(0, 0),
+        config.hat_address,
+    ));
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let result = nomopractic::ipc::serve(config, hat, shutdown_rx).await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("not a Unix socket"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn serve_rejects_symlink_at_socket_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target_file");
+    let sock_path = dir.path().join("link.sock");
+
+    // Create a regular file and a symlink pointing to it.
+    std::fs::write(&target, b"target").unwrap();
+    std::os::unix::fs::symlink(&target, &sock_path).unwrap();
+
+    let mut config = Config::default();
+    config.socket_path = sock_path;
+    let config = Arc::new(config);
+
+    let hat = Arc::new(nomopractic::hat::i2c::Hat::new(
+        MockI2c::new(0, 0),
+        config.hat_address,
+    ));
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let result = nomopractic::ipc::serve(config, hat, shutdown_rx).await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("not a Unix socket"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn get_battery_voltage_over_socket() {
     // raw = 0x0001 = 1 → voltage_v = 1 × 3.0 = 3.0
     let (config, shutdown_tx, handle, _dir) = start_test_server_with_adc(0x00, 0x01).await;
@@ -262,5 +318,23 @@ async fn oversized_message_is_dropped_connection_remains_usable() {
 
     let _ = shutdown_tx.send(true);
     drop(reader);
+async fn oversized_message_closes_connection() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let mut stream = UnixStream::connect(&config.socket_path).await.unwrap();
+
+    // Send a message that is 1 byte longer than the 4096-byte limit.
+    let big_msg = "x".repeat(4097);
+    stream.write_all(big_msg.as_bytes()).await.unwrap();
+    stream.write_all(b"\n").await.unwrap();
+    stream.flush().await.unwrap();
+
+    // The server should close the connection; a subsequent read must return 0.
+    // Any non-zero read buffer is sufficient; we only need to observe EOF (n == 0).
+    let mut buf = vec![0u8; 16];
+    let n = stream.read(&mut buf).await.unwrap();
+    assert_eq!(n, 0, "server should close connection on oversized message");
+
+    let _ = shutdown_tx.send(true);
     let _ = handle.await;
 }
