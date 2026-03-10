@@ -9,6 +9,12 @@ pub enum HatError {
     I2c(String),
     #[error("invalid ADC channel {0}: must be 0–7")]
     InvalidChannel(u8),
+    #[error("invalid servo channel {0}: must be 0–11")]
+    InvalidServoChannel(u8),
+    #[error("invalid pulse width {0} µs: must be 500–2500")]
+    InvalidPulse(u16),
+    #[error("invalid angle {0}°: must be 0.0–180.0")]
+    InvalidAngle(f64),
 }
 
 /// Abstraction over raw I2C bus operations, enabling mock injection in tests.

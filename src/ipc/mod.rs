@@ -6,6 +6,7 @@ pub mod schema;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -13,6 +14,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::hat::i2c::Hat;
+use crate::hat::pwm;
 use handler::Handler;
 
 /// Maximum NDJSON message size (bytes).
@@ -55,6 +57,16 @@ pub async fn serve(
 
     let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat)));
 
+    // Spawn the TTL lease watchdog — idles servo channels when leases expire.
+    {
+        let watchdog_handler = Arc::clone(&handler);
+        let poll_ms = config.watchdog_poll_ms;
+        let watchdog_shutdown = shutdown.clone();
+        tokio::spawn(watchdog_task(watchdog_handler, poll_ms, watchdog_shutdown));
+    }
+
+    let conn_counter = Arc::new(AtomicU64::new(1));
+
     loop {
         let mut shutdown_for_select = shutdown.clone();
         tokio::select! {
@@ -62,11 +74,16 @@ pub async fn serve(
                 match accept_result {
                     Ok((stream, _addr)) => {
                         let handler = Arc::clone(&handler);
+                        let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed);
                         let mut shutdown_rx = shutdown.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client(stream, handler, &mut shutdown_rx).await {
+                            if let Err(e) =
+                                handle_client(stream, Arc::clone(&handler), conn_id, &mut shutdown_rx)
+                                    .await
+                            {
                                 warn!(error = %e, "client session error");
                             }
+                            handler.on_client_disconnect(conn_id).await;
                         });
                     }
                     Err(e) => {
@@ -98,6 +115,7 @@ async fn shutdown_changed(rx: &mut tokio::sync::watch::Receiver<bool>) {
 async fn handle_client(
     stream: tokio::net::UnixStream,
     handler: Arc<Handler>,
+    conn_id: u64,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let (read_half, mut writer) = stream.into_split();
@@ -145,7 +163,7 @@ async fn handle_client(
                 }
             }
             Some(Ok(_)) => {
-                let response_json = handler.dispatch(buf.trim_end()).await;
+                let response_json = handler.dispatch(buf.trim_end(), conn_id).await;
                 writer.write_all(response_json.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
@@ -179,6 +197,29 @@ where
         }
         let n = buf.len();
         reader.consume(n);
+    }
+}
+
+/// Background task that polls the lease store every `poll_ms` milliseconds and
+/// idles any PWM channels whose TTL has expired.
+async fn watchdog_task(
+    handler: Arc<Handler>,
+    poll_ms: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(poll_ms)) => {
+                let expired = handler.lease_manager().poll_expired().await;
+                for ch in expired {
+                    warn!(channel = ch, "servo lease expired; idling channel");
+                    if let Err(e) = pwm::set_channel_pulse_us(handler.hat(), ch, 0).await {
+                        error!(error = %e, channel = ch, "failed to idle expired servo channel");
+                    }
+                }
+            }
+            _ = shutdown_changed(&mut shutdown) => break,
+        }
     }
 }
 

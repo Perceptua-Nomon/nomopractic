@@ -98,32 +98,32 @@ hardware interaction.
 **Goal**: Drive servos on PWM channels 0–11. Includes TTL lease safety watchdog.
 
 ### 3.1 — PWM Control
-- [ ] `hat/pwm.rs`: Prescaler calculation from `CLOCK_HZ` / `SERVO_FREQ`
-- [ ] PWM initialization: set prescaler + auto-reload registers
-- [ ] Channel pulse write: `REG_CHN + channel * 4`
-- [ ] Frequency validation (50 Hz default for servos)
+- [x] `hat/pwm.rs`: Prescaler calculation from `CLOCK_HZ` / `SERVO_FREQ`
+- [x] PWM initialization: set prescaler + auto-reload registers
+- [x] Channel pulse write: `REG_CHN + channel * 4`
+- [x] Frequency validation (50 Hz default for servos)
 
 ### 3.2 — Servo Abstraction
-- [ ] `hat/servo.rs`: Angle → pulse_us conversion
+- [x] `hat/servo.rs`: Angle → pulse_us conversion
   - `pulse_us = 500 + (angle / 180) × 2000`
-- [ ] `set_servo_pulse_us` IPC method
-- [ ] `set_servo_angle` IPC method
-- [ ] Channel validation (0–11), pulse range validation (500–2500 µs)
-- [ ] Angle range validation (0–180°)
+- [x] `set_servo_pulse_us` IPC method
+- [x] `set_servo_angle` IPC method
+- [x] Channel validation (0–11), pulse range validation (500–2500 µs)
+- [x] Angle range validation (0–180°)
 
 ### 3.3 — TTL Lease Watchdog
-- [ ] Per-channel lease tracking: `(channel, expires_at)`
-- [ ] Background watchdog task (polls every `watchdog_poll_ms`)
-- [ ] Expired lease → idle channel (pulse_us = 0)
-- [ ] Client disconnect → release all leases for that client
-- [ ] Warning log on lease expiry
-- [ ] Unit tests for watchdog timing
+- [x] Per-channel lease tracking: `(channel, expires_at)`
+- [x] Background watchdog task (polls every `watchdog_poll_ms`)
+- [x] Expired lease → idle channel (pulse_us = 0)
+- [x] Client disconnect → release all leases for that client
+- [x] Warning log on lease expiry
+- [x] Unit tests for watchdog timing
 
 ### Phase 3 Exit Criteria
-- Servo commands work via IPC
-- TTL watchdog idles channels on expired leases
-- Client disconnect cleans up leases
-- All tests pass without hardware
+- [x] Servo commands work via IPC
+- [x] TTL watchdog idles channels on expired leases
+- [x] Client disconnect cleans up leases
+- [x] All tests pass without hardware
 
 ---
 
@@ -197,6 +197,6 @@ hardware interaction.
 |-------|------|--------|-------|
 | 1 | Foundation & IPC Scaffold | ✅ Complete | 19 |
 | 2 | I2C & Battery Voltage | ✅ Complete | 31 |
-| 3 | PWM & Servo Control | 🔲 Not Started | — |
+| 3 | PWM & Servo Control | ✅ Complete | 62 |
 | 4 | GPIO & MCU Reset | 🔲 Not Started | — |
 | 5 | Hardening & Deployment | 🔲 Not Started | — |

@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 use nomopractic::config::Config;
 use nomopractic::hat::i2c::{Hat, RppalI2c};
+use nomopractic::hat::pwm;
 
 /// nomopractic — low-latency HAT hardware daemon for the nomon fleet.
 #[derive(Parser)]
@@ -41,6 +42,12 @@ async fn main() -> anyhow::Result<()> {
         RppalI2c::open(config.i2c_bus).map_err(anyhow::Error::new)?,
         config.hat_address,
     ));
+
+    pwm::init_pwm(&hat, pwm::SERVO_FREQ)
+        .await
+        .map_err(|e| anyhow::anyhow!("PWM init failed: {e}"))?;
+
+    info!("PWM initialized at {} Hz", pwm::SERVO_FREQ);
 
     let config = Arc::new(config);
 
