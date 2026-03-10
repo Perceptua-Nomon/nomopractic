@@ -224,9 +224,7 @@ fn extract_ttl(request: &Request, default_ttl_ms: u64) -> Result<u64, Response> 
     const TTL_MIN_MS: u64 = 100;
     const TTL_MAX_MS: u64 = 5000;
     match request.params.get("ttl_ms") {
-        None | Some(serde_json::Value::Null) => {
-            Ok(default_ttl_ms.clamp(TTL_MIN_MS, TTL_MAX_MS))
-        }
+        None | Some(serde_json::Value::Null) => Ok(default_ttl_ms.clamp(TTL_MIN_MS, TTL_MAX_MS)),
         Some(v) => match v.as_u64() {
             Some(ms) if (TTL_MIN_MS..=TTL_MAX_MS).contains(&ms) => Ok(ms),
             _ => Err(Response::err(
