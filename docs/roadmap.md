@@ -199,4 +199,4 @@ hardware interaction.
 | 2 | I2C & Battery Voltage | ✅ Complete | 31 |
 | 3 | PWM & Servo Control | ✅ Complete | 62 |
 | 4 | GPIO & MCU Reset | ✅ Complete | 82 |
-| 5 | Hardening & Deployment | � In Progress | — |
+| 5 | Hardening & Deployment | 🔄 In Progress | — |

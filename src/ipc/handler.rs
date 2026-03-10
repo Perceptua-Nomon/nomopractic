@@ -291,7 +291,13 @@ impl Handler {
     async fn handle_reset_mcu(&self, request: &Request) -> Response {
         let now = Instant::now();
         {
-            let mut guard = self.last_reset_at.lock().await;
+            // Check the rate-limit and release the lock before the reset so
+            // that `reset_mcu` (which acquires `gpio.bus`) is not executed
+            // under `last_reset_at` — the two locks are independent and this
+            // avoids holding `last_reset_at` across an async sleep.
+            // The lock is re-acquired below only on success; a failed attempt
+            // therefore does not block a retry.
+            let guard = self.last_reset_at.lock().await;
             if let Some(last) = *guard {
                 let elapsed_ms = now
                     .checked_duration_since(last)
@@ -306,10 +312,12 @@ impl Handler {
                     );
                 }
             }
-            *guard = Some(now);
         }
         match reset::reset_mcu(&self.gpio).await {
-            Ok(result) => Response::ok(request.id.clone(), json!({ "reset_ms": result.reset_ms })),
+            Ok(result) => {
+                *self.last_reset_at.lock().await = Some(now);
+                Response::ok(request.id.clone(), json!({ "reset_ms": result.reset_ms }))
+            }
             Err(e) => {
                 warn!(error = %e, "reset_mcu failed");
                 Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())

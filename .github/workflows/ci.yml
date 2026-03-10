@@ -79,11 +79,9 @@ jobs:
         run: cross build --target aarch64-unknown-linux-gnu --release
 
       - name: Compute SHA-256
-        id: sha
         run: |
           sha256sum target/aarch64-unknown-linux-gnu/release/nomopractic \
             > target/aarch64-unknown-linux-gnu/release/nomopractic.sha256
-          echo "sha=$(cat target/aarch64-unknown-linux-gnu/release/nomopractic.sha256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
