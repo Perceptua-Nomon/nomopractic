@@ -288,6 +288,99 @@ async fn get_battery_voltage_over_socket() {
     let _ = handle.await;
 }
 
+// ---------------------------------------------------------------------------
+// Servo IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn set_servo_pulse_us_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"s1","method":"set_servo_pulse_us","params":{"channel":0,"pulse_us":1500}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "s1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["channel"], 0);
+    assert_eq!(resp["result"]["pulse_us"], 1500);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_servo_angle_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"s2","method":"set_servo_angle","params":{"channel":1,"angle_deg":0.0}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "s2");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["channel"], 1);
+    assert_eq!(resp["result"]["angle_deg"], 0.0_f64);
+    assert_eq!(resp["result"]["pulse_us"], 500);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_servo_angle_180_degrees_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"s3","method":"set_servo_angle","params":{"channel":0,"angle_deg":180.0}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["pulse_us"], 2500);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_servo_pulse_us_invalid_channel_returns_invalid_params() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"s4","method":"set_servo_pulse_us","params":{"channel":12,"pulse_us":1500}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
 #[tokio::test]
 async fn oversized_message_is_dropped_connection_remains_usable() {
     let (config, shutdown_tx, handle, _dir) = start_test_server().await;

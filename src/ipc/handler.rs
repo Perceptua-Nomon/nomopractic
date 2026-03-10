@@ -4,18 +4,32 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::json;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use super::schema::{Request, Response};
 use crate::config::Config;
 use crate::hat::battery;
-use crate::hat::i2c::Hat;
+use crate::hat::i2c::{Hat, HatError};
+use crate::hat::servo::LeaseManager;
+use crate::hat::{pwm, servo};
+
+/// Classify a `HatError` into an IPC error code string.
+fn hat_error_code(e: &HatError) -> &'static str {
+    match e {
+        HatError::I2c(_) => "HARDWARE_ERROR",
+        HatError::InvalidChannel(_)
+        | HatError::InvalidServoChannel(_)
+        | HatError::InvalidPulse(_)
+        | HatError::InvalidAngle(_) => "INVALID_PARAMS",
+    }
+}
 
 /// Processes incoming IPC requests and returns serialized JSON responses.
 pub struct Handler {
     config: Arc<Config>,
     start_time: Instant,
     hat: Arc<Hat>,
+    lease_manager: Arc<LeaseManager>,
 }
 
 impl Handler {
@@ -24,11 +38,36 @@ impl Handler {
             config,
             start_time: Instant::now(),
             hat,
+            lease_manager: Arc::new(LeaseManager::new()),
+        }
+    }
+
+    pub fn lease_manager(&self) -> &Arc<LeaseManager> {
+        &self.lease_manager
+    }
+
+    pub fn hat(&self) -> &Arc<Hat> {
+        &self.hat
+    }
+
+    /// Release all servo leases for a disconnected connection and idle any active channels.
+    pub async fn on_client_disconnect(&self, conn_id: u64) {
+        let channels = self.lease_manager.release_connection(conn_id).await;
+        for ch in channels {
+            warn!(
+                channel = ch,
+                conn_id, "client disconnected; idling leased servo channel"
+            );
+            if let Err(e) = pwm::set_channel_pulse_us(&self.hat, ch, 0).await {
+                error!(error = %e, channel = ch, "failed to idle channel on client disconnect");
+            }
         }
     }
 
     /// Parse a raw JSON line, dispatch the method, and return a JSON response string.
-    pub async fn dispatch(&self, raw: &str) -> String {
+    ///
+    /// `conn_id` identifies the originating connection for servo lease tracking.
+    pub async fn dispatch(&self, raw: &str, conn_id: u64) -> String {
         let request: Request = match serde_json::from_str(raw) {
             Ok(r) => r,
             Err(e) => {
@@ -48,6 +87,8 @@ impl Handler {
         let response = match request.method.as_str() {
             "health" => self.handle_health(&request),
             "get_battery_voltage" => self.handle_get_battery_voltage(&request).await,
+            "set_servo_pulse_us" => self.handle_set_servo_pulse_us(&request, conn_id).await,
+            "set_servo_angle" => self.handle_set_servo_angle(&request, conn_id).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -85,6 +126,113 @@ impl Handler {
                 Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
             }
         }
+    }
+
+    async fn handle_set_servo_pulse_us(&self, request: &Request, conn_id: u64) -> Response {
+        let channel = match extract_channel(request) {
+            Ok(ch) => ch,
+            Err(resp) => return resp,
+        };
+        let pulse_us = match request.params.get("pulse_us").and_then(|v| v.as_u64()) {
+            Some(p) if (500..=2500).contains(&p) => p as u16,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "pulse_us is required and must be 500–2500",
+                );
+            }
+        };
+        let ttl_ms = extract_ttl(request, self.config.servo_default_ttl_ms);
+        let ttl_ms = match ttl_ms {
+            Ok(ms) => ms,
+            Err(resp) => return resp,
+        };
+
+        match servo::set_servo_pulse_us(&self.hat, channel, pulse_us).await {
+            Ok(()) => {
+                self.lease_manager.set_lease(channel, conn_id, ttl_ms).await;
+                Response::ok(
+                    request.id.clone(),
+                    json!({ "channel": channel, "pulse_us": pulse_us }),
+                )
+            }
+            Err(e) => {
+                warn!(error = %e, "set_servo_pulse_us failed");
+                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+            }
+        }
+    }
+
+    async fn handle_set_servo_angle(&self, request: &Request, conn_id: u64) -> Response {
+        let channel = match extract_channel(request) {
+            Ok(ch) => ch,
+            Err(resp) => return resp,
+        };
+        let angle_deg = match request.params.get("angle_deg").and_then(|v| v.as_f64()) {
+            Some(a) if (0.0..=180.0).contains(&a) => a,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "angle_deg is required and must be 0.0–180.0",
+                );
+            }
+        };
+        let ttl_ms = extract_ttl(request, self.config.servo_default_ttl_ms);
+        let ttl_ms = match ttl_ms {
+            Ok(ms) => ms,
+            Err(resp) => return resp,
+        };
+
+        match servo::set_servo_angle(&self.hat, channel, angle_deg).await {
+            Ok(pulse_us) => {
+                self.lease_manager.set_lease(channel, conn_id, ttl_ms).await;
+                Response::ok(
+                    request.id.clone(),
+                    json!({
+                        "channel": channel,
+                        "angle_deg": angle_deg,
+                        "pulse_us": pulse_us,
+                    }),
+                )
+            }
+            Err(e) => {
+                warn!(error = %e, "set_servo_angle failed");
+                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+            }
+        }
+    }
+}
+
+/// Extract and validate `channel` (0–11) from request params.
+fn extract_channel(request: &Request) -> Result<u8, Response> {
+    match request.params.get("channel").and_then(|v| v.as_u64()) {
+        Some(ch) if ch <= 11 => Ok(ch as u8),
+        Some(_) | None => Err(Response::err(
+            request.id.clone(),
+            "INVALID_PARAMS",
+            "channel is required and must be 0–11",
+        )),
+    }
+}
+
+/// Extract and validate `ttl_ms` (100–5000) from request params, using
+/// `default_ttl_ms` when the key is absent. The default is clamped to the
+/// same 100–5000 ms range so misconfigured defaults are handled gracefully.
+fn extract_ttl(request: &Request, default_ttl_ms: u64) -> Result<u64, Response> {
+    const TTL_MIN_MS: u64 = 100;
+    const TTL_MAX_MS: u64 = 5000;
+    match request.params.get("ttl_ms") {
+        None | Some(serde_json::Value::Null) => Ok(default_ttl_ms.clamp(TTL_MIN_MS, TTL_MAX_MS)),
+        Some(v) => match v.as_u64() {
+            Some(ms) if (TTL_MIN_MS..=TTL_MAX_MS).contains(&ms) => Ok(ms),
+            _ => Err(Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                "ttl_ms must be an integer 100–5000",
+            )),
+        },
     }
 }
 
@@ -125,7 +273,7 @@ mod tests {
     async fn health_returns_ok() {
         let handler = test_handler();
         let raw = r#"{"id":"1","method":"health","params":{}}"#;
-        let resp_str = handler.dispatch(raw).await;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["id"], "1");
@@ -142,7 +290,7 @@ mod tests {
     async fn unknown_method_returns_error() {
         let handler = test_handler();
         let raw = r#"{"id":"2","method":"explode","params":{}}"#;
-        let resp_str = handler.dispatch(raw).await;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["id"], "2");
@@ -154,7 +302,7 @@ mod tests {
     async fn malformed_json_returns_error() {
         let handler = test_handler();
         let raw = "this is not json";
-        let resp_str = handler.dispatch(raw).await;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["ok"], false);
@@ -165,7 +313,7 @@ mod tests {
     async fn missing_method_field_returns_error() {
         let handler = test_handler();
         let raw = r#"{"id":"3"}"#;
-        let resp_str = handler.dispatch(raw).await;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["ok"], false);
@@ -177,7 +325,7 @@ mod tests {
         let handler = test_handler();
         // Valid request without params field — should still dispatch.
         let raw = r#"{"id":"4","method":"health"}"#;
-        let resp_str = handler.dispatch(raw).await;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["ok"], true);
@@ -189,11 +337,64 @@ mod tests {
         // raw = 0x0001 = 1 → voltage_v = 1 × 3.0 = 3.0
         let handler = test_handler_with_adc(0x00, 0x01);
         let raw = r#"{"id":"5","method":"get_battery_voltage","params":{}}"#;
-        let resp_str = handler.dispatch(raw).await;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["id"], "5");
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["voltage_v"], 3.0_f64);
+    }
+
+    #[tokio::test]
+    async fn set_servo_pulse_us_returns_channel_and_pulse() {
+        let handler = test_handler();
+        let raw =
+            r#"{"id":"6","method":"set_servo_pulse_us","params":{"channel":0,"pulse_us":1500}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "6");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 0);
+        assert_eq!(resp["result"]["pulse_us"], 1500);
+    }
+
+    #[tokio::test]
+    async fn set_servo_angle_returns_channel_angle_and_pulse() {
+        let handler = test_handler();
+        let raw =
+            r#"{"id":"7","method":"set_servo_angle","params":{"channel":2,"angle_deg":90.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "7");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 2);
+        assert_eq!(resp["result"]["angle_deg"], 90.0_f64);
+        assert_eq!(resp["result"]["pulse_us"], 1500);
+    }
+
+    #[tokio::test]
+    async fn set_servo_pulse_us_invalid_channel_returns_invalid_params() {
+        let handler = test_handler();
+        let raw =
+            r#"{"id":"8","method":"set_servo_pulse_us","params":{"channel":12,"pulse_us":1500}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_servo_angle_invalid_angle_returns_invalid_params() {
+        let handler = test_handler();
+        let raw =
+            r#"{"id":"9","method":"set_servo_angle","params":{"channel":0,"angle_deg":200.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
     }
 }
