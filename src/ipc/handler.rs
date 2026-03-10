@@ -218,12 +218,17 @@ fn extract_channel(request: &Request) -> Result<u8, Response> {
 }
 
 /// Extract and validate `ttl_ms` (100–5000) from request params, using
-/// `default_ttl_ms` when the key is absent.
+/// `default_ttl_ms` when the key is absent. The default is clamped to the
+/// same 100–5000 ms range so misconfigured defaults are handled gracefully.
 fn extract_ttl(request: &Request, default_ttl_ms: u64) -> Result<u64, Response> {
+    const TTL_MIN_MS: u64 = 100;
+    const TTL_MAX_MS: u64 = 5000;
     match request.params.get("ttl_ms") {
-        None | Some(serde_json::Value::Null) => Ok(default_ttl_ms),
+        None | Some(serde_json::Value::Null) => {
+            Ok(default_ttl_ms.clamp(TTL_MIN_MS, TTL_MAX_MS))
+        }
         Some(v) => match v.as_u64() {
-            Some(ms) if (100..=5000).contains(&ms) => Ok(ms),
+            Some(ms) if (TTL_MIN_MS..=TTL_MAX_MS).contains(&ms) => Ok(ms),
             _ => Err(Response::err(
                 request.id.clone(),
                 "INVALID_PARAMS",
