@@ -95,9 +95,7 @@ async fn start_test_server_with_adc(
     let dir = tempfile::tempdir().unwrap();
     let sock_path = dir.path().join("test.sock");
 
-    let mut config = Config::default();
-    config.socket_path = sock_path;
-    let config = Arc::new(config);
+    let config = Arc::new(Config { socket_path: sock_path, ..Default::default() });
 
     let hat = Arc::new(Hat::new(MockI2c::new(hi, lo), config.hat_address));
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
@@ -247,9 +245,7 @@ async fn serve_rejects_regular_file_at_socket_path() {
     // Create a regular file at the socket path.
     std::fs::write(&sock_path, b"regular file content").unwrap();
 
-    let mut config = Config::default();
-    config.socket_path = sock_path;
-    let config = Arc::new(config);
+    let config = Arc::new(Config { socket_path: sock_path, ..Default::default() });
 
     let hat = Arc::new(nomopractic::hat::i2c::Hat::new(
         MockI2c::new(0, 0),
@@ -277,9 +273,7 @@ async fn serve_rejects_symlink_at_socket_path() {
     std::fs::write(&target, b"target").unwrap();
     std::os::unix::fs::symlink(&target, &sock_path).unwrap();
 
-    let mut config = Config::default();
-    config.socket_path = sock_path;
-    let config = Arc::new(config);
+    let config = Arc::new(Config { socket_path: sock_path, ..Default::default() });
 
     let hat = Arc::new(nomopractic::hat::i2c::Hat::new(
         MockI2c::new(0, 0),
