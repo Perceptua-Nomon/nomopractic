@@ -8,6 +8,8 @@
 // | SW       |  19 | Input     |
 // | LED      |  26 | Output    |
 
+use std::collections::HashMap;
+
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -82,24 +84,42 @@ pub trait GpioBus: Send {
 /// rppal-backed GPIO implementation for target hardware.
 pub struct RppalGpio {
     gpio: rppal::gpio::Gpio,
+    /// Cached output pin handles, keyed by BCM number.
+    ///
+    /// Retaining the handle keeps the pin in output mode; dropping an
+    /// `OutputPin` causes rppal to reset the line back to input (floating),
+    /// which would truncate any active drive (e.g. the MCU reset pulse).
+    output_pins: HashMap<u8, rppal::gpio::OutputPin>,
 }
 
 impl RppalGpio {
     /// Open the Raspberry Pi GPIO controller.
     pub fn open() -> Result<Self, GpioError> {
         rppal::gpio::Gpio::new()
-            .map(|gpio| Self { gpio })
+            .map(|gpio| Self {
+                gpio,
+                output_pins: HashMap::new(),
+            })
             .map_err(|e| GpioError::Gpio(e.to_string()))
     }
 }
 
 impl GpioBus for RppalGpio {
     fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
-        let mut pin = self
-            .gpio
-            .get(pin_bcm)
-            .map_err(|e| GpioError::Gpio(e.to_string()))?
-            .into_output();
+        // Acquire or reuse a cached output handle so the pin stays in output
+        // mode between calls (e.g. across the sleep in reset_mcu).
+        if !self.output_pins.contains_key(&pin_bcm) {
+            let output = self
+                .gpio
+                .get(pin_bcm)
+                .map_err(|e| GpioError::Gpio(e.to_string()))?
+                .into_output();
+            self.output_pins.insert(pin_bcm, output);
+        }
+        let pin = self
+            .output_pins
+            .get_mut(&pin_bcm)
+            .expect("pin must exist in output_pins after insert");
         if high {
             pin.set_high();
         } else {
@@ -109,6 +129,11 @@ impl GpioBus for RppalGpio {
     }
 
     fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
+        // If the pin is already held as an output, read its current level
+        // from the cached handle rather than acquiring a conflicting input.
+        if let Some(pin) = self.output_pins.get(&pin_bcm) {
+            return Ok(pin.is_set_high());
+        }
         let pin = self
             .gpio
             .get(pin_bcm)

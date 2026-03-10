@@ -63,7 +63,7 @@ VERSION="$1"
 PI_HOST="${2:-${NOMON_PI_HOST:-}}"
 
 # Validate version format.
-if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Error: version must start with 'v' followed by semver (e.g. v0.2.0)" >&2
     exit 1
 fi
@@ -76,15 +76,6 @@ if [[ -n "$PI_HOST" ]]; then
     if [[ -n "${NOMON_SSH_KEY:-}" ]]; then
         SSH_OPTS+=(-i "$NOMON_SSH_KEY")
     fi
-    run_remote() {
-        # shellcheck disable=SC2029
-        ssh "${SSH_OPTS[@]}" "$PI_HOST" "bash -s" <<'REMOTE_SCRIPT'
-set -euo pipefail
-REMOTE_SCRIPT
-        # Pass the function body as a heredoc
-        # Alternative: inline mode used below via _remote_cmd
-        :
-    }
     _rsh() { ssh "${SSH_OPTS[@]}" "$PI_HOST" "$@"; }
     _rscp() { scp "${SSH_OPTS[@]}" "$@"; }
     ON_REMOTE=true
