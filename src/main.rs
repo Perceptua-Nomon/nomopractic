@@ -5,6 +5,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use nomopractic::config::Config;
+use nomopractic::hat::gpio::{HatGpio, RppalGpio};
 use nomopractic::hat::i2c::{Hat, RppalI2c};
 use nomopractic::hat::pwm;
 
@@ -49,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("PWM initialized at {} Hz", pwm::SERVO_FREQ);
 
+    let gpio = Arc::new(HatGpio::new(
+        RppalGpio::open().map_err(|e| anyhow::anyhow!("GPIO init failed: {e}"))?,
+    ));
+
+    info!("GPIO initialized");
+
     let config = Arc::new(config);
 
     // Shutdown signal — set to true on ctrl-c.
@@ -63,5 +70,5 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    nomopractic::ipc::serve(config, hat, shutdown_rx).await
+    nomopractic::ipc::serve(config, hat, gpio, shutdown_rx).await
 }

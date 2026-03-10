@@ -132,21 +132,21 @@ hardware interaction.
 **Goal**: Named GPIO pin abstraction and MCU reset capability.
 
 ### 4.1 — GPIO Pins
-- [ ] `hat/gpio.rs`: Named pin enum (D4, D5, MCURST, SW, LED)
-- [ ] BCM pin mapping
-- [ ] Direction configuration (input/output)
-- [ ] Read/write operations
+- [x] `hat/gpio.rs`: Named pin enum (D4, D5, MCURST, SW, LED)
+- [x] BCM pin mapping
+- [x] Direction configuration (input/output)
+- [x] Read/write operations
 
 ### 4.2 — MCU Reset
-- [ ] `reset.rs`: Assert BCM5 low for ≥ 10 ms, release high
-- [ ] `reset_mcu` IPC method
-- [ ] Response includes `reset_ms` duration
-- [ ] Safety: debounce / rate-limit reset requests
+- [x] `reset.rs`: Assert BCM5 low for ≥ 10 ms, release high
+- [x] `reset_mcu` IPC method
+- [x] Response includes `reset_ms` duration
+- [x] Safety: debounce / rate-limit reset requests
 
 ### Phase 4 Exit Criteria
-- GPIO readable/writable via IPC
-- MCU reset works via IPC
-- All tests pass without hardware
+- [x] GPIO readable/writable via IPC
+- [x] MCU reset works via IPC
+- [x] All tests pass without hardware
 
 ---
 
@@ -155,14 +155,14 @@ hardware interaction.
 **Goal**: Production-ready daemon with CI, cross-compilation, and deploy tooling.
 
 ### 5.1 — CI Pipeline
-- [ ] GitHub Actions workflow: test, clippy, fmt, cross-compile
-- [ ] Cross-compile for `aarch64-unknown-linux-gnu`
-- [ ] Binary artifact uploaded to GitHub Releases
+- [x] GitHub Actions workflow: test, clippy, fmt, cross-compile (`.github/workflows/ci.yml`)
+- [x] Cross-compile for `aarch64-unknown-linux-gnu` (via `cross`)
+- [x] Binary artifact uploaded to GitHub Releases (on `v*` tags via `softprops/action-gh-release`)
 
 ### 5.2 — Deploy Script
-- [ ] `scripts/deploy.sh`: Download binary, verify SHA-256, atomic swap, restart service
-- [ ] Version pinning in script arguments
-- [ ] Rollback support (keep previous binary)
+- [x] `scripts/deploy.sh`: Download binary, verify SHA-256, atomic swap, restart service
+- [x] Version pinning in script arguments (`./deploy.sh <version> [<pi-host>]`)
+- [x] Rollback support (keep previous binary as `nomopractic.bak`)
 
 ### 5.3 — Integration Testing on Pi
 - [ ] End-to-end test: start daemon → connect via socket → verify HAT responses
@@ -171,10 +171,10 @@ hardware interaction.
 - [ ] MCU reset test
 
 ### 5.4 — nomothetic Integration
-- [ ] Implement `nomothetic.hat.HatClient` in Python repo
-- [ ] Add HAT REST endpoints to `nomothetic.api`
-- [ ] End-to-end: REST → HatClient → Unix socket → nomopractic → I2C → HAT
-- [ ] Mock-socket tests in nomothetic
+- [x] Implement `nomothetic.hat.HatClient` in Python repo
+- [x] Add HAT REST endpoints to `nomothetic.api` (GET /api/hat/battery, POST /api/hat/servo, POST /api/hat/reset)
+- [x] End-to-end: REST → HatClient → Unix socket → nomopractic → I2C → HAT
+- [x] Mock-socket tests in nomothetic (20 tests in `tests/test_hat.py`)
 
 ### Phase 5 Exit Criteria
 - CI green on every push
@@ -198,5 +198,5 @@ hardware interaction.
 | 1 | Foundation & IPC Scaffold | ✅ Complete | 19 |
 | 2 | I2C & Battery Voltage | ✅ Complete | 31 |
 | 3 | PWM & Servo Control | ✅ Complete | 62 |
-| 4 | GPIO & MCU Reset | 🔲 Not Started | — |
-| 5 | Hardening & Deployment | 🔲 Not Started | — |
+| 4 | GPIO & MCU Reset | ✅ Complete | 82 |
+| 5 | Hardening & Deployment | � In Progress | — |

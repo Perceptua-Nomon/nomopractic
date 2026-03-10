@@ -13,6 +13,7 @@ use tokio::net::UnixListener;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+use crate::hat::gpio::HatGpio;
 use crate::hat::i2c::Hat;
 use crate::hat::pwm;
 use handler::Handler;
@@ -24,6 +25,7 @@ const MAX_MESSAGE_LEN: usize = 4096;
 pub async fn serve(
     config: Arc<Config>,
     hat: Arc<Hat>,
+    gpio: Arc<HatGpio>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let sock_path = &config.socket_path;
@@ -55,7 +57,7 @@ pub async fn serve(
     set_socket_permissions(sock_path, config.socket_mode)?;
     info!(path = %sock_path.display(), "IPC listener started");
 
-    let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat)));
+    let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat), gpio));
 
     // Spawn the TTL lease watchdog — idles servo channels when leases expire.
     {

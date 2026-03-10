@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
+use nomopractic::hat::gpio::{GpioBus, GpioError, HatGpio};
 use nomopractic::hat::i2c::{Hat, HatError, I2cBus};
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,33 @@ impl I2cBus for MockI2c {
             buf[1] = self.adc_response[1];
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock GPIO bus
+// ---------------------------------------------------------------------------
+
+struct MockGpio {
+    state: std::collections::HashMap<u8, bool>,
+}
+
+impl MockGpio {
+    fn new() -> Self {
+        Self {
+            state: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl GpioBus for MockGpio {
+    fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
+        self.state.insert(pin_bcm, high);
+        Ok(())
+    }
+
+    fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
+        Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
     }
 }
 
@@ -72,11 +100,13 @@ async fn start_test_server_with_adc(
     let config = Arc::new(config);
 
     let hat = Arc::new(Hat::new(MockI2c::new(hi, lo), config.hat_address));
+    let gpio = Arc::new(HatGpio::new(MockGpio::new()));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let cfg = Arc::clone(&config);
-    let handle = tokio::spawn(async move { nomopractic::ipc::serve(cfg, hat, shutdown_rx).await });
+    let handle =
+        tokio::spawn(async move { nomopractic::ipc::serve(cfg, hat, gpio, shutdown_rx).await });
 
     // Give the listener a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -225,9 +255,10 @@ async fn serve_rejects_regular_file_at_socket_path() {
         MockI2c::new(0, 0),
         config.hat_address,
     ));
+    let gpio = Arc::new(HatGpio::new(MockGpio::new()));
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let result = nomopractic::ipc::serve(config, hat, shutdown_rx).await;
+    let result = nomopractic::ipc::serve(config, hat, gpio, shutdown_rx).await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -254,9 +285,10 @@ async fn serve_rejects_symlink_at_socket_path() {
         MockI2c::new(0, 0),
         config.hat_address,
     ));
+    let gpio = Arc::new(HatGpio::new(MockGpio::new()));
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let result = nomopractic::ipc::serve(config, hat, shutdown_rx).await;
+    let result = nomopractic::ipc::serve(config, hat, gpio, shutdown_rx).await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -469,6 +501,103 @@ async fn message_one_over_max_size_is_rejected() {
 
     assert_eq!(resp["id"], "after_one_over");
     assert_eq!(resp["ok"], true);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+// ---------------------------------------------------------------------------
+// GPIO IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reset_mcu_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"rst1","method":"reset_mcu","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "rst1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(
+        resp["result"]["reset_ms"],
+        nomopractic::reset::RESET_HOLD_MS
+    );
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn read_gpio_sw_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"gpio1","method":"read_gpio","params":{"pin":"SW"}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "gpio1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["pin"], "SW");
+    assert_eq!(resp["result"]["high"], false);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn write_gpio_led_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"gpio2","method":"write_gpio","params":{"pin":"LED","high":true}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "gpio2");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["pin"], "LED");
+    assert_eq!(resp["result"]["high"], true);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn write_gpio_input_pin_returns_invalid_params_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"gpio3","method":"write_gpio","params":{"pin":"SW","high":false}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "gpio3");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
 
     let _ = shutdown_tx.send(true);
     drop(reader);
