@@ -1,7 +1,7 @@
 // Request dispatch — routes method names to HAT driver functions.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tracing::{debug, error, warn};
@@ -9,9 +9,14 @@ use tracing::{debug, error, warn};
 use super::schema::{Request, Response};
 use crate::config::Config;
 use crate::hat::battery;
+use crate::hat::gpio::{self, GpioError, HatGpio};
 use crate::hat::i2c::{Hat, HatError};
 use crate::hat::servo::LeaseManager;
 use crate::hat::{pwm, servo};
+use crate::reset;
+
+/// Minimum interval between consecutive MCU reset requests (ms).
+const RESET_MIN_INTERVAL_MS: u64 = 1000;
 
 /// Classify a `HatError` into an IPC error code string.
 fn hat_error_code(e: &HatError) -> &'static str {
@@ -24,21 +29,33 @@ fn hat_error_code(e: &HatError) -> &'static str {
     }
 }
 
+/// Classify a `GpioError` into an IPC error code string.
+fn gpio_error_code(e: &GpioError) -> &'static str {
+    match e {
+        GpioError::Gpio(_) => "HARDWARE_ERROR",
+        GpioError::ReadOnly(_) => "INVALID_PARAMS",
+    }
+}
+
 /// Processes incoming IPC requests and returns serialized JSON responses.
 pub struct Handler {
     config: Arc<Config>,
     start_time: Instant,
     hat: Arc<Hat>,
     lease_manager: Arc<LeaseManager>,
+    gpio: Arc<HatGpio>,
+    last_reset_at: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl Handler {
-    pub fn new(config: Arc<Config>, hat: Arc<Hat>) -> Self {
+    pub fn new(config: Arc<Config>, hat: Arc<Hat>, gpio: Arc<HatGpio>) -> Self {
         Self {
             config,
             start_time: Instant::now(),
             hat,
             lease_manager: Arc::new(LeaseManager::new()),
+            gpio,
+            last_reset_at: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -89,6 +106,9 @@ impl Handler {
             "get_battery_voltage" => self.handle_get_battery_voltage(&request).await,
             "set_servo_pulse_us" => self.handle_set_servo_pulse_us(&request, conn_id).await,
             "set_servo_angle" => self.handle_set_servo_angle(&request, conn_id).await,
+            "read_gpio" => self.handle_read_gpio(&request).await,
+            "write_gpio" => self.handle_write_gpio(&request).await,
+            "reset_mcu" => self.handle_reset_mcu(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -203,6 +223,107 @@ impl Handler {
             }
         }
     }
+
+    async fn handle_read_gpio(&self, request: &Request) -> Response {
+        let pin_name = match request.params.get("pin").and_then(|v| v.as_str()) {
+            Some(s) => s.to_owned(),
+            None => return Response::err(request.id.clone(), "INVALID_PARAMS", "pin is required"),
+        };
+        let pin = match gpio::GpioPin::from_name(&pin_name) {
+            Some(p) => p,
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("unknown pin '{pin_name}'; valid: D4, D5, MCURST, SW, LED"),
+                );
+            }
+        };
+        match gpio::read_gpio_pin(&self.gpio, pin).await {
+            Ok(high) => Response::ok(
+                request.id.clone(),
+                json!({ "pin": pin.name(), "high": high }),
+            ),
+            Err(e) => {
+                warn!(error = %e, "read_gpio failed");
+                Response::err(request.id.clone(), gpio_error_code(&e), e.to_string())
+            }
+        }
+    }
+
+    async fn handle_write_gpio(&self, request: &Request) -> Response {
+        let pin_name = match request.params.get("pin").and_then(|v| v.as_str()) {
+            Some(s) => s.to_owned(),
+            None => return Response::err(request.id.clone(), "INVALID_PARAMS", "pin is required"),
+        };
+        let pin = match gpio::GpioPin::from_name(&pin_name) {
+            Some(p) => p,
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("unknown pin '{pin_name}'; valid output pins: D4, D5, MCURST, LED"),
+                );
+            }
+        };
+        let high = match request.params.get("high").and_then(|v| v.as_bool()) {
+            Some(h) => h,
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "high is required and must be a boolean",
+                );
+            }
+        };
+        match gpio::write_gpio_pin(&self.gpio, pin, high).await {
+            Ok(()) => Response::ok(
+                request.id.clone(),
+                json!({ "pin": pin.name(), "high": high }),
+            ),
+            Err(e) => {
+                warn!(error = %e, "write_gpio failed");
+                Response::err(request.id.clone(), gpio_error_code(&e), e.to_string())
+            }
+        }
+    }
+
+    async fn handle_reset_mcu(&self, request: &Request) -> Response {
+        let now = Instant::now();
+        {
+            // Check the rate-limit and release the lock before the reset so
+            // that `reset_mcu` (which acquires `gpio.bus`) is not executed
+            // under `last_reset_at` — the two locks are independent and this
+            // avoids holding `last_reset_at` across an async sleep.
+            // The lock is re-acquired below only on success; a failed attempt
+            // therefore does not block a retry.
+            let guard = self.last_reset_at.lock().await;
+            if let Some(last) = *guard {
+                let elapsed_ms = now
+                    .checked_duration_since(last)
+                    .unwrap_or(Duration::ZERO)
+                    .as_millis() as u64;
+                if elapsed_ms < RESET_MIN_INTERVAL_MS {
+                    let remaining = RESET_MIN_INTERVAL_MS - elapsed_ms;
+                    return Response::err(
+                        request.id.clone(),
+                        "HARDWARE_ERROR",
+                        format!("MCU reset rate-limited; retry after {remaining} ms"),
+                    );
+                }
+            }
+        }
+        match reset::reset_mcu(&self.gpio).await {
+            Ok(result) => {
+                *self.last_reset_at.lock().await = Some(now);
+                Response::ok(request.id.clone(), json!({ "reset_ms": result.reset_ms }))
+            }
+            Err(e) => {
+                warn!(error = %e, "reset_mcu failed");
+                Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
+            }
+        }
+    }
 }
 
 /// Extract and validate `channel` (0–11) from request params.
@@ -239,6 +360,7 @@ fn extract_ttl(request: &Request, default_ttl_ms: u64) -> Result<u64, Response> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hat::gpio::{GpioBus, GpioError, HatGpio};
     use crate::hat::i2c::{HatError, I2cBus};
 
     struct MockI2c {
@@ -259,14 +381,39 @@ mod tests {
         }
     }
 
+    struct MockGpio {
+        state: std::collections::HashMap<u8, bool>,
+    }
+
+    impl MockGpio {
+        fn new() -> Self {
+            Self {
+                state: std::collections::HashMap::new(),
+            }
+        }
+    }
+
+    impl GpioBus for MockGpio {
+        fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
+            self.state.insert(pin_bcm, high);
+            Ok(())
+        }
+
+        fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
+            Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
+        }
+    }
+
     fn test_handler() -> Handler {
         let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
-        Handler::new(Arc::new(Config::default()), hat)
+        let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+        Handler::new(Arc::new(Config::default()), hat, gpio)
     }
 
     fn test_handler_with_adc(hi: u8, lo: u8) -> Handler {
         let hat = Arc::new(Hat::new(MockI2c { response: [hi, lo] }, 0x14));
-        Handler::new(Arc::new(Config::default()), hat)
+        let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+        Handler::new(Arc::new(Config::default()), hat, gpio)
     }
 
     #[tokio::test]
@@ -392,6 +539,86 @@ mod tests {
         let raw =
             r#"{"id":"9","method":"set_servo_angle","params":{"channel":0,"angle_deg":200.0}}"#;
         let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn reset_mcu_returns_reset_ms() {
+        let handler = test_handler();
+        let raw = r#"{"id":"r1","method":"reset_mcu","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "r1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["reset_ms"], crate::reset::RESET_HOLD_MS);
+    }
+
+    #[tokio::test]
+    async fn reset_mcu_rate_limited_on_rapid_retry() {
+        let handler = test_handler();
+        let raw = r#"{"id":"r2","method":"reset_mcu","params":{}}"#;
+        // First call succeeds.
+        handler.dispatch(raw, 0).await;
+        // Immediate second call must be rate-limited.
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("rate-limited")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_gpio_sw_returns_low_by_default() {
+        let handler = test_handler();
+        let raw = r#"{"id":"g1","method":"read_gpio","params":{"pin":"SW"}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "g1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["pin"], "SW");
+        assert_eq!(resp["result"]["high"], false);
+    }
+
+    #[tokio::test]
+    async fn write_gpio_d4_returns_ok() {
+        let handler = test_handler();
+        let raw = r#"{"id":"g2","method":"write_gpio","params":{"pin":"D4","high":true}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "g2");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["pin"], "D4");
+        assert_eq!(resp["result"]["high"], true);
+    }
+
+    #[tokio::test]
+    async fn write_gpio_input_pin_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"g3","method":"write_gpio","params":{"pin":"SW","high":true}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn read_gpio_unknown_pin_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"g4","method":"read_gpio","params":{"pin":"BADPIN"}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["ok"], false);

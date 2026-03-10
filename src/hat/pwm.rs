@@ -86,13 +86,15 @@ mod tests {
     use super::*;
     use crate::hat::i2c::{HatError, I2cBus};
 
+    type WriteLog = Arc<Mutex<Vec<(u8, Vec<u8>)>>>;
+
     /// Observable mock that records (addr, bytes) pairs for each `write_bytes` call.
     struct MockI2c {
-        writes: Arc<Mutex<Vec<(u8, Vec<u8>)>>>,
+        writes: WriteLog,
     }
 
     impl MockI2c {
-        fn new() -> (Self, Arc<Mutex<Vec<(u8, Vec<u8>)>>>) {
+        fn new() -> (Self, WriteLog) {
             let log = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
