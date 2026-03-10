@@ -21,11 +21,12 @@ const MAX_CHANNEL: u8 = 11;
 const MIN_ANGLE: f64 = 0.0;
 const MAX_ANGLE: f64 = 180.0;
 
-/// Convert an angle in degrees (0–180) to a pulse width in microseconds.
+/// Convert an angle in degrees to a pulse width in microseconds.
 ///
 /// Formula: `pulse_us = 500 + (angle / 180.0) × 2000`
-/// Clamps the angle to [0, 180] before conversion — callers should validate first.
+/// Clamps `angle_deg` to [0, 180] before conversion.
 pub fn angle_to_pulse_us(angle_deg: f64) -> u16 {
+    let angle_deg = angle_deg.clamp(MIN_ANGLE, MAX_ANGLE);
     (500.0 + (angle_deg / 180.0) * 2000.0).round() as u16
 }
 
@@ -161,6 +162,16 @@ mod tests {
     fn angle_to_pulse_us_at_forty_five_degrees() {
         // 500 + (45/180)*2000 = 500 + 500 = 1000
         assert_eq!(angle_to_pulse_us(45.0), 1000);
+    }
+
+    #[test]
+    fn angle_to_pulse_us_clamps_below_zero() {
+        assert_eq!(angle_to_pulse_us(-45.0), 500);
+    }
+
+    #[test]
+    fn angle_to_pulse_us_clamps_above_180() {
+        assert_eq!(angle_to_pulse_us(200.0), 2500);
     }
 
     // ------------------------------------------------------------------

@@ -9,6 +9,8 @@
 //   CLOCK_HZ = 72 MHz
 //   PERIOD   = 4095
 
+use std::sync::atomic::Ordering;
+
 use crate::hat::i2c::{Hat, HatError, write_register};
 
 const REG_CHN: u8 = 0x20;
@@ -21,8 +23,6 @@ const REG_ARR2: u8 = 0x54;
 const CLOCK_HZ: u64 = 72_000_000;
 /// PWM period (auto-reload register value) — 12-bit counter (0–4095).
 const PERIOD: u16 = 4095;
-/// Period in microseconds at 50 Hz: 1_000_000 / 50 = 20_000.
-const PERIOD_US: u32 = 20_000;
 /// Default servo PWM frequency (Hz).
 pub const SERVO_FREQ: u32 = 50;
 
@@ -35,6 +35,9 @@ const MAX_CHANNEL: u8 = 11;
 /// - Group 1 (`REG_PSC` / `REG_ARR`): channels 0–7
 /// - Group 2 (`REG_PSC2` / `REG_ARR2`): channels 8–11
 ///
+/// Also stores the period in µs (`1_000_000 / freq_hz`) in the `Hat` context
+/// so that `set_channel_pulse_us` uses the correct period for duty calculations.
+///
 /// Must be called once before any `set_channel_pulse_us` calls.
 pub async fn init_pwm(hat: &Hat, freq_hz: u32) -> Result<(), HatError> {
     if freq_hz == 0 {
@@ -44,6 +47,10 @@ pub async fn init_pwm(hat: &Hat, freq_hz: u32) -> Result<(), HatError> {
     let arr = PERIOD;
     let psc_bytes = prescaler.to_be_bytes();
     let arr_bytes = arr.to_be_bytes();
+
+    // Store the period in µs so set_channel_pulse_us uses the correct value.
+    let period_us = 1_000_000_u32 / freq_hz;
+    hat.pwm_period_us.store(period_us, Ordering::Release);
 
     let mut bus = hat.bus.lock().await;
     // Group 1: channels 0–7
@@ -59,11 +66,13 @@ pub async fn init_pwm(hat: &Hat, freq_hz: u32) -> Result<(), HatError> {
 ///
 /// `pulse_us = 0` disables the channel (used by the watchdog to idle servos).
 /// The duty register is `REG_CHN + channel × 4`, written as big-endian u16.
+/// The period in µs is read from `hat.pwm_period_us`, which is set by `init_pwm`.
 pub async fn set_channel_pulse_us(hat: &Hat, channel: u8, pulse_us: u16) -> Result<(), HatError> {
     if channel > MAX_CHANNEL {
         return Err(HatError::InvalidServoChannel(channel));
     }
-    let duty = (pulse_us as u32 * PERIOD as u32 / PERIOD_US) as u16;
+    let period_us = hat.pwm_period_us.load(Ordering::Acquire);
+    let duty = (pulse_us as u32 * PERIOD as u32 / period_us) as u16;
     let reg = REG_CHN + channel * 4;
 
     let mut bus = hat.bus.lock().await;
@@ -166,5 +175,22 @@ mod tests {
 
         let writes = log.lock().unwrap();
         assert_eq!(writes[0], (0x14, vec![0x4C, 0x01, 0xFF]));
+    }
+
+    #[tokio::test]
+    async fn set_channel_pulse_us_uses_period_from_init_pwm() {
+        // After init at 100 Hz, period_us = 1_000_000 / 100 = 10_000
+        // duty = 1500 * 4095 / 10_000 = 614 = 0x0266
+        let (mock, log) = MockI2c::new();
+        let hat = Hat::new(mock, 0x14);
+        init_pwm(&hat, 100).await.unwrap();
+
+        log.lock().unwrap().clear(); // discard init writes
+
+        set_channel_pulse_us(&hat, 0, 1500).await.unwrap();
+
+        let writes = log.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0], (0x14, vec![0x20, 0x02, 0x66]));
     }
 }

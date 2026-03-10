@@ -1,5 +1,7 @@
 // Low-level I2C helpers — read/write registers on the HAT (bus 1, address 0x14).
 
+use std::sync::atomic::AtomicU32;
+
 use thiserror::Error;
 
 /// Errors from HAT hardware operations.
@@ -89,6 +91,9 @@ impl I2cBus for RppalI2c {
 pub struct Hat {
     pub bus: tokio::sync::Mutex<Box<dyn I2cBus>>,
     pub address: u8,
+    /// Period in microseconds corresponding to the frequency set by `init_pwm`.
+    /// Defaults to 20 000 µs (50 Hz). Updated atomically by `init_pwm`.
+    pub pwm_period_us: AtomicU32,
 }
 
 impl Hat {
@@ -97,6 +102,7 @@ impl Hat {
         Self {
             bus: tokio::sync::Mutex::new(Box::new(bus)),
             address,
+            pwm_period_us: AtomicU32::new(20_000), // 50 Hz default
         }
     }
 }
