@@ -34,7 +34,8 @@ fn hat_error_code(e: &HatError) -> &'static str {
         | HatError::InvalidServoChannel(_)
         | HatError::InvalidMotorChannel(_)
         | HatError::InvalidPulse(_)
-        | HatError::InvalidAngle(_) => "INVALID_PARAMS",
+        | HatError::InvalidAngle(_)
+        | HatError::InvalidParam(_) => "INVALID_PARAMS",
     }
 }
 
@@ -454,7 +455,7 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("speed_pct {s} is out of range -100.0..100.0"),
+                    format!("speed_pct {s} is out of range -100.0..=100.0"),
                 );
             }
             None => {
@@ -540,6 +541,10 @@ impl Handler {
     /// same speed simultaneously.  All configured motors are commanded in a
     /// single Rust call to avoid the per-motor latency and race conditions that
     /// would occur when issuing two separate `set_motor_speed` IPC requests.
+    ///
+    /// Failure-atomic: leases are only committed after **all** motors have been
+    /// successfully commanded.  If any motor fails, already-set motors are
+    /// rolled back (idled) and no leases are committed.
     async fn handle_drive(&self, request: &Request, conn_id: u64) -> Response {
         let speed_pct = match request.params.get("speed_pct").and_then(|v| v.as_f64()) {
             Some(s) if (-100.0..=100.0).contains(&s) => s,
@@ -547,7 +552,7 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("speed_pct {s} is out of range −100.0–100.0"),
+                    format!("speed_pct {s} is out of range -100.0..=100.0"),
                 );
             }
             None => {
@@ -567,6 +572,9 @@ impl Handler {
             return Response::err(request.id.clone(), "INVALID_PARAMS", "no motors configured");
         }
 
+        // Phase 1: command all motors.  Track which channels succeeded so we
+        // can roll back on partial failure.
+        let mut succeeded: Vec<u8> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for (ipc_ch, cfg) in self.config.motors.iter().enumerate() {
             match motor::set_motor_speed(
@@ -579,11 +587,7 @@ impl Handler {
             )
             .await
             {
-                Ok(()) => {
-                    self.motor_lease_manager
-                        .set_lease(ipc_ch as u8, conn_id, ttl_ms)
-                        .await;
-                }
+                Ok(()) => succeeded.push(ipc_ch as u8),
                 Err(e) => {
                     warn!(error = %e, channel = ipc_ch, "drive: set_motor_speed failed");
                     errors.push(format!("channel {ipc_ch}: {e}"));
@@ -592,6 +596,12 @@ impl Handler {
         }
 
         if errors.is_empty() {
+            // Phase 2: all succeeded — commit leases now.
+            for ipc_ch in &succeeded {
+                self.motor_lease_manager
+                    .set_lease(*ipc_ch, conn_id, ttl_ms)
+                    .await;
+            }
             Response::ok(
                 request.id.clone(),
                 json!({
@@ -600,7 +610,18 @@ impl Handler {
                 }),
             )
         } else {
-            Response::err(request.id.clone(), "HARDWARE_ERROR", errors.join("; "))
+            // Phase 2: partial failure — roll back any motors that did start.
+            let mut rollback_errors: Vec<String> = Vec::new();
+            for ipc_ch in &succeeded {
+                let cfg = &self.config.motors[*ipc_ch as usize];
+                if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                    error!(error = %e, channel = ipc_ch, "drive: rollback idle failed");
+                    rollback_errors.push(format!("channel {ipc_ch}: rollback failed: {e}"));
+                }
+            }
+            let mut all_errors = errors;
+            all_errors.extend(rollback_errors);
+            Response::err(request.id.clone(), "HARDWARE_ERROR", all_errors.join("; "))
         }
     }
 

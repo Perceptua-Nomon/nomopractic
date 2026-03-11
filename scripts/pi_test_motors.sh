@@ -17,6 +17,7 @@
 # Exit codes:
 #   0  all tests passed
 #   1  one or more tests failed
+#   3  target host unreachable
 
 set -euo pipefail
 

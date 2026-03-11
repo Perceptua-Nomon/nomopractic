@@ -246,6 +246,29 @@ impl Config {
                 });
             }
         }
+        // Validate uniqueness of pwm_channel and dir_pin_bcm across all motors.
+        let mut seen_pwm: std::collections::HashSet<u8> = std::collections::HashSet::new();
+        let mut seen_dir: std::collections::HashSet<u8> = std::collections::HashSet::new();
+        for (i, m) in self.motors.iter().enumerate() {
+            if !seen_pwm.insert(m.pwm_channel) {
+                return Err(ConfigError::Validation {
+                    field: "motors[].pwm_channel",
+                    reason: format!(
+                        "motors[{i}].pwm_channel {} is duplicated; each motor must use a unique PWM channel",
+                        m.pwm_channel
+                    ),
+                });
+            }
+            if !seen_dir.insert(m.dir_pin_bcm) {
+                return Err(ConfigError::Validation {
+                    field: "motors[].dir_pin_bcm",
+                    reason: format!(
+                        "motors[{i}].dir_pin_bcm {} is duplicated; each motor must use a unique direction pin",
+                        m.dir_pin_bcm
+                    ),
+                });
+            }
+        }
         // Validate named servo channels.
         for (name, ch) in [
             ("servos.camera_pan", self.servos.camera_pan),
@@ -498,5 +521,33 @@ steering = 5
         writeln!(f, "[sensors]\ngrayscale = [0, 1, 8]").unwrap();
         let err = Config::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("grayscale"));
+    }
+
+    #[test]
+    fn duplicate_motor_pwm_channel_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "[[motors]]\npwm_channel = 12\ndir_pin_bcm = 24\n\
+             [[motors]]\npwm_channel = 12\ndir_pin_bcm = 23"
+        )
+        .unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("pwm_channel"));
+        assert!(err.to_string().contains("duplicated"));
+    }
+
+    #[test]
+    fn duplicate_motor_dir_pin_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "[[motors]]\npwm_channel = 12\ndir_pin_bcm = 24\n\
+             [[motors]]\npwm_channel = 13\ndir_pin_bcm = 24"
+        )
+        .unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("dir_pin_bcm"));
+        assert!(err.to_string().contains("duplicated"));
     }
 }
