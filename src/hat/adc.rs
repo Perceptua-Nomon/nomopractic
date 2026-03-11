@@ -39,6 +39,8 @@ pub async fn read_adc(hat: &Hat, channel: u8) -> Result<u16, HatError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::hat::i2c::{HatError, I2cBus};
 
@@ -59,6 +61,27 @@ mod tests {
     impl I2cBus for MockI2c {
         fn write_bytes(&mut self, _addr: u8, data: &[u8]) -> Result<(), HatError> {
             self.last_write = Some(data.to_vec());
+            Ok(())
+        }
+
+        fn read_bytes(&mut self, _addr: u8, buf: &mut [u8]) -> Result<(), HatError> {
+            if buf.len() >= 2 {
+                buf[0] = self.adc_response[0];
+                buf[1] = self.adc_response[1];
+            }
+            Ok(())
+        }
+    }
+
+    /// Mock that records all write payloads via a shared log for post-call inspection.
+    struct CapturingMockI2c {
+        adc_response: [u8; 2],
+        write_log: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl I2cBus for CapturingMockI2c {
+        fn write_bytes(&mut self, _addr: u8, data: &[u8]) -> Result<(), HatError> {
+            self.write_log.lock().unwrap().push(data.to_vec());
             Ok(())
         }
 
@@ -98,5 +121,18 @@ mod tests {
         let hat = Hat::new(MockI2c::new(0xFF, 0xFF), 0x14);
         let val = read_adc(&hat, 7).await.unwrap();
         assert_eq!(val, u16::MAX);
+    }
+
+    /// channel 4 → cmd = 0x10 | (7 - 4) = 0x13; write_register sends [cmd] only.
+    #[tokio::test]
+    async fn read_adc_writes_correct_command_byte_for_channel_4() {
+        let write_log = Arc::new(Mutex::new(Vec::new()));
+        let hat = Hat::new(
+            CapturingMockI2c { adc_response: [0, 0], write_log: write_log.clone() },
+            0x14,
+        );
+        read_adc(&hat, 4).await.unwrap();
+        let log = write_log.lock().unwrap();
+        assert_eq!(log[0], vec![0x13u8]);
     }
 }
