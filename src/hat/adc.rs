@@ -128,7 +128,10 @@ mod tests {
     async fn read_adc_writes_correct_command_byte_for_channel_4() {
         let write_log = Arc::new(Mutex::new(Vec::new()));
         let hat = Hat::new(
-            CapturingMockI2c { adc_response: [0, 0], write_log: write_log.clone() },
+            CapturingMockI2c {
+                adc_response: [0, 0],
+                write_log: write_log.clone(),
+            },
             0x14,
         );
         read_adc(&hat, 4).await.unwrap();
