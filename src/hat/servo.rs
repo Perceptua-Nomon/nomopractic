@@ -17,7 +17,7 @@ use crate::hat::pwm;
 
 const MIN_PULSE_US: u16 = 500;
 const MAX_PULSE_US: u16 = 2500;
-const MAX_CHANNEL: u8 = 11;
+use crate::hat::pwm::MAX_CHANNEL;
 const MIN_ANGLE: f64 = 0.0;
 const MAX_ANGLE: f64 = 180.0;
 
@@ -125,6 +125,23 @@ impl LeaseManager {
             map.remove(ch);
         }
         expired
+    }
+
+    /// Returns `(channel, ttl_remaining_ms, conn_id)` for every lease that
+    /// has not yet expired.
+    pub async fn get_active_leases(&self) -> Vec<(u8, u64, u64)> {
+        let now = Instant::now();
+        self.leases
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(&ch, entry)| {
+                entry
+                    .expires_at
+                    .checked_duration_since(now)
+                    .map(|d| (ch, d.as_millis() as u64, entry.conn_id))
+            })
+            .collect()
     }
 }
 

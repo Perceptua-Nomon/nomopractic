@@ -170,6 +170,22 @@ hardware interaction.
 - [ ] Servo sweep test (0° → 180° → 0°)
 - [ ] MCU reset test
 
+### 5.5 — Raw ADC IPC Method
+- [x] `read_adc` IPC method: expose raw ADC reads for all channels A0–A7
+- [x] Channel validation (0–7), `INVALID_PARAMS` on out-of-range
+- [x] `HARDWARE_ERROR` propagated on I2C failure
+- [x] Response: `{ channel, raw_value }`
+- [x] Unit tests: valid channel, invalid channel, raw value passthrough
+
+### 5.6 — Code Consolidation
+- [x] Deduplicate `MAX_CHANNEL = 11`: export as `pub const` from `pwm.rs`, import in `servo.rs`
+
+### 5.7 — Daemon State Methods
+- [x] `get_servo_status` IPC method: active lease list with `channel`, `ttl_remaining_ms`, `conn_id`
+- [x] `get_mcu_status` IPC method: `resets_since_start` counter, `last_reset_s_ago` (null if never reset)
+- [x] `reset_count: AtomicU64` in `Handler`; incremented on every successful `reset_mcu`
+- [x] Unit tests for both methods
+
 ### 5.4 — nomothetic Integration
 - [x] Implement `nomothetic.hat.HatClient` in Python repo
 - [x] Add HAT REST endpoints to `nomothetic.api` (GET /api/hat/battery, POST /api/hat/servo, POST /api/hat/reset)
@@ -199,4 +215,4 @@ hardware interaction.
 | 2 | I2C & Battery Voltage | ✅ Complete | 31 |
 | 3 | PWM & Servo Control | ✅ Complete | 62 |
 | 4 | GPIO & MCU Reset | ✅ Complete | 82 |
-| 5 | Hardening & Deployment | 🔄 In Progress | — |
+| 5 | Hardening & Deployment | 🔄 In Progress | 89 |

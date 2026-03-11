@@ -1,6 +1,7 @@
 // Request dispatch — routes method names to HAT driver functions.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -8,6 +9,7 @@ use tracing::{debug, error, warn};
 
 use super::schema::{Request, Response};
 use crate::config::Config;
+use crate::hat::adc;
 use crate::hat::battery;
 use crate::hat::gpio::{self, GpioError, HatGpio};
 use crate::hat::i2c::{Hat, HatError};
@@ -45,6 +47,7 @@ pub struct Handler {
     lease_manager: Arc<LeaseManager>,
     gpio: Arc<HatGpio>,
     last_reset_at: tokio::sync::Mutex<Option<Instant>>,
+    reset_count: AtomicU64,
 }
 
 impl Handler {
@@ -56,6 +59,7 @@ impl Handler {
             lease_manager: Arc::new(LeaseManager::new()),
             gpio,
             last_reset_at: tokio::sync::Mutex::new(None),
+            reset_count: AtomicU64::new(0),
         }
     }
 
@@ -104,11 +108,14 @@ impl Handler {
         let response = match request.method.as_str() {
             "health" => self.handle_health(&request),
             "get_battery_voltage" => self.handle_get_battery_voltage(&request).await,
+            "read_adc" => self.handle_read_adc(&request).await,
             "set_servo_pulse_us" => self.handle_set_servo_pulse_us(&request, conn_id).await,
             "set_servo_angle" => self.handle_set_servo_angle(&request, conn_id).await,
             "read_gpio" => self.handle_read_gpio(&request).await,
             "write_gpio" => self.handle_write_gpio(&request).await,
             "reset_mcu" => self.handle_reset_mcu(&request).await,
+            "get_servo_status" => self.handle_get_servo_status(&request).await,
+            "get_mcu_status" => self.handle_get_mcu_status(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -144,6 +151,29 @@ impl Handler {
             Err(e) => {
                 warn!(error = %e, "battery read failed");
                 Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
+            }
+        }
+    }
+
+    async fn handle_read_adc(&self, request: &Request) -> Response {
+        let channel = match request.params.get("channel").and_then(|v| v.as_u64()) {
+            Some(ch) if ch <= 7 => ch as u8,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "channel is required and must be 0–7",
+                );
+            }
+        };
+        match adc::read_adc(&self.hat, channel).await {
+            Ok(raw) => Response::ok(
+                request.id.clone(),
+                json!({ "channel": channel, "raw_value": raw }),
+            ),
+            Err(e) => {
+                warn!(error = %e, "read_adc failed");
+                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
             }
         }
     }
@@ -316,6 +346,7 @@ impl Handler {
         match reset::reset_mcu(&self.gpio).await {
             Ok(result) => {
                 *self.last_reset_at.lock().await = Some(now);
+                self.reset_count.fetch_add(1, Ordering::Release);
                 Response::ok(request.id.clone(), json!({ "reset_ms": result.reset_ms }))
             }
             Err(e) => {
@@ -323,6 +354,35 @@ impl Handler {
                 Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
             }
         }
+    }
+    async fn handle_get_servo_status(&self, request: &Request) -> Response {
+        let leases = self.lease_manager.get_active_leases().await;
+        let active: Vec<_> = leases
+            .iter()
+            .map(|(ch, ttl_remaining_ms, conn_id)| {
+                json!({
+                    "channel": ch,
+                    "ttl_remaining_ms": ttl_remaining_ms,
+                    "conn_id": conn_id,
+                })
+            })
+            .collect();
+        Response::ok(request.id.clone(), json!({ "active_leases": active }))
+    }
+
+    async fn handle_get_mcu_status(&self, request: &Request) -> Response {
+        let resets = self.reset_count.load(Ordering::Acquire);
+        let last_reset_s_ago = {
+            let guard = self.last_reset_at.lock().await;
+            guard.map(|t| t.elapsed().as_secs())
+        };
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "resets_since_start": resets,
+                "last_reset_s_ago": last_reset_s_ago,
+            }),
+        )
     }
 }
 
@@ -623,5 +683,100 @@ mod tests {
 
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn read_adc_valid_channel_returns_raw_value() {
+        // raw bytes 0x00, 0x2A → u16 = 42
+        let handler = test_handler_with_adc(0x00, 0x2A);
+        let raw = r#"{"id":"a1","method":"read_adc","params":{"channel":0}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "a1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 0);
+        assert_eq!(resp["result"]["raw_value"], 42);
+    }
+
+    #[tokio::test]
+    async fn read_adc_max_channel_is_accepted() {
+        let handler = test_handler_with_adc(0x01, 0x00);
+        let raw = r#"{"id":"a2","method":"read_adc","params":{"channel":7}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 7);
+    }
+
+    #[tokio::test]
+    async fn read_adc_invalid_channel_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"a3","method":"read_adc","params":{"channel":8}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn get_servo_status_empty_returns_no_leases() {
+        let handler = test_handler();
+        let raw = r#"{"id":"v1","method":"get_servo_status","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "v1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["active_leases"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_servo_status_after_set_returns_lease() {
+        let handler = test_handler();
+        // Register a lease on channel 3 owned by conn_id 42.
+        let set_raw =
+            r#"{"id":"6","method":"set_servo_pulse_us","params":{"channel":3,"pulse_us":1500}}"#;
+        handler.dispatch(set_raw, 42).await;
+        let raw = r#"{"id":"v2","method":"get_servo_status","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], true);
+        let leases = resp["result"]["active_leases"].as_array().unwrap();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0]["channel"], 3);
+        assert_eq!(leases[0]["conn_id"], 42);
+        assert!(leases[0]["ttl_remaining_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn get_mcu_status_no_resets() {
+        let handler = test_handler();
+        let raw = r#"{"id":"m1","method":"get_mcu_status","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "m1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["resets_since_start"], 0);
+        assert!(resp["result"]["last_reset_s_ago"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_mcu_status_after_reset() {
+        let handler = test_handler();
+        handler
+            .dispatch(r#"{"id":"r1","method":"reset_mcu","params":{}}"#, 0)
+            .await;
+        let raw = r#"{"id":"m2","method":"get_mcu_status","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["resets_since_start"], 1);
+        assert!(resp["result"]["last_reset_s_ago"].is_number());
     }
 }
