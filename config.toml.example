@@ -22,3 +22,20 @@ reversed    = false
 pwm_channel = 13   # P13
 dir_pin_bcm = 23   # D4 (BCM 23)
 reversed    = true  # right motor is wired with reversed polarity on PicarX
+
+# Named servo channel configuration — maps logical servo roles to Robot HAT V4
+# PWM channels (0–11).  Set a channel to the correct PWM output for your
+# wiring; omit the key (or comment it out) to disable that servo.
+# Defaults below match the SunFounder PicarX.
+
+[servos]
+camera_pan  = 0   # P0 — horizontal camera rotation
+camera_tilt = 1   # P1 — vertical camera tilt
+steering    = 2   # P2 — front-wheel steering servo
+
+# Named ADC sensor channel configuration — maps logical sensor roles to Robot
+# HAT V4 ADC channels (0–7).  Defaults below match the SunFounder PicarX
+# grayscale module (A0–A2).
+
+[sensors]
+grayscale = [0, 1, 2]   # A0 = left, A1 = centre, A2 = right

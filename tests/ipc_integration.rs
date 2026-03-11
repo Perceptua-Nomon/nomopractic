@@ -616,13 +616,7 @@ async fn get_motor_status_empty_over_socket() {
 
     assert_eq!(resp["id"], "m6");
     assert_eq!(resp["ok"], true);
-    assert_eq!(
-        resp["result"]["active_leases"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
+    assert_eq!(resp["result"]["active_leases"].as_array().unwrap().len(), 0);
 
     let _ = shutdown_tx.send(true);
     drop(reader);

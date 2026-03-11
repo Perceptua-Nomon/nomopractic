@@ -37,6 +37,48 @@ pub struct MotorConfig {
     pub reversed: bool,
 }
 
+/// Named servo channel assignments for PicarX (configurable).
+///
+/// Each field maps a semantic servo name to a PWM channel number (0–11).
+/// Set to `None` to disable that servo for this robot configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ServoChannels {
+    /// Camera pan servo (horizontal, left/right). Default: channel 0.
+    pub camera_pan: Option<u8>,
+    /// Camera tilt servo (vertical, up/down). Default: channel 1.
+    pub camera_tilt: Option<u8>,
+    /// Front-wheel steering servo. Default: channel 2.
+    pub steering: Option<u8>,
+}
+
+impl Default for ServoChannels {
+    fn default() -> Self {
+        Self {
+            camera_pan: Some(0),
+            camera_tilt: Some(1),
+            steering: Some(2),
+        }
+    }
+}
+
+/// Named ADC sensor channel assignments.
+///
+/// ADC channels A0–A7 on the Robot HAT V4.  The three grayscale sensors
+/// (line / cliff detection) use channels A0–A2 on PicarX.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SensorChannels {
+    /// Grayscale sensor ADC channels [left, center, right]. Default: [0, 1, 2].
+    pub grayscale: [u8; 3],
+}
+
+impl Default for SensorChannels {
+    fn default() -> Self {
+        Self {
+            grayscale: [0, 1, 2],
+        }
+    }
+}
+
 /// Daemon configuration.
 ///
 /// Loaded from TOML file, overridden by `NOMON_HAT_*` environment variables.
@@ -54,6 +96,10 @@ pub struct Config {
     /// Motor channel configurations (up to 4).  Positions in the Vec are the
     /// IPC motor indices (0-based) used in `set_motor_speed` requests.
     pub motors: Vec<MotorConfig>,
+    /// Named servo channel assignments.
+    pub servos: ServoChannels,
+    /// Named ADC sensor channel assignments.
+    pub sensors: SensorChannels,
 }
 
 impl Default for Config {
@@ -82,6 +128,8 @@ impl Default for Config {
                     reversed: true,
                 },
             ],
+            servos: ServoChannels::default(),
+            sensors: SensorChannels::default(),
         }
     }
 }
@@ -195,6 +243,30 @@ impl Config {
                         "motors[{i}].pwm_channel {} is out of range 12–15",
                         m.pwm_channel
                     ),
+                });
+            }
+        }
+        // Validate named servo channels.
+        for (name, ch) in [
+            ("servos.camera_pan", self.servos.camera_pan),
+            ("servos.camera_tilt", self.servos.camera_tilt),
+            ("servos.steering", self.servos.steering),
+        ] {
+            if let Some(ch) = ch
+                && ch > 11
+            {
+                return Err(ConfigError::Validation {
+                    field: "servos",
+                    reason: format!("{name} channel {ch} is out of range 0–11"),
+                });
+            }
+        }
+        // Validate grayscale sensor ADC channels.
+        for (i, &ch) in self.sensors.grayscale.iter().enumerate() {
+            if ch > 7 {
+                return Err(ConfigError::Validation {
+                    field: "sensors.grayscale",
+                    reason: format!("sensors.grayscale[{i}] channel {ch} is out of range 0–7"),
                 });
             }
         }
@@ -362,5 +434,69 @@ reversed = true
         assert_eq!(config.i2c_bus, 3);
         assert_eq!(config.hat_address, 0x20);
         assert_eq!(config.log_level, "debug");
+    }
+
+    #[test]
+    fn defaults_include_servo_and_sensor_channels() {
+        let config = Config::default();
+        assert_eq!(config.servos.camera_pan, Some(0));
+        assert_eq!(config.servos.camera_tilt, Some(1));
+        assert_eq!(config.servos.steering, Some(2));
+        assert_eq!(config.sensors.grayscale, [0, 1, 2]);
+    }
+
+    #[test]
+    fn servo_channels_configurable_from_toml() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            r#"
+[servos]
+camera_pan = 3
+camera_tilt = 4
+steering = 5
+"#
+        )
+        .unwrap();
+        let config = Config::load(f.path()).unwrap();
+        assert_eq!(config.servos.camera_pan, Some(3));
+        assert_eq!(config.servos.camera_tilt, Some(4));
+        assert_eq!(config.servos.steering, Some(5));
+    }
+
+    #[test]
+    fn servo_channel_out_of_range_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[servos]\nsteering = 12").unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("servos"));
+    }
+
+    #[test]
+    fn servo_channel_can_be_disabled() {
+        let mut f = NamedTempFile::new().unwrap();
+        // A partial [servos] table leaves unspecified fields as None.
+        writeln!(f, "[servos]\ncamera_pan = 0\ncamera_tilt = 1").unwrap();
+        let config = Config::load(f.path()).unwrap();
+        // steering was not specified in the override, so it is None.
+        assert_eq!(config.servos.steering, None);
+        assert_eq!(config.servos.camera_pan, Some(0));
+        assert_eq!(config.servos.camera_tilt, Some(1));
+    }
+
+    #[test]
+    fn sensor_channels_configurable_from_toml() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[sensors]\ngrayscale = [3, 4, 5]").unwrap();
+        let config = Config::load(f.path()).unwrap();
+        assert_eq!(config.sensors.grayscale, [3, 4, 5]);
+    }
+
+    #[test]
+    fn grayscale_channel_out_of_range_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[sensors]\ngrayscale = [0, 1, 8]").unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("grayscale"));
     }
 }

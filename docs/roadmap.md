@@ -214,8 +214,6 @@ hardware interaction.
 
 ---
 
----
-
 ## Phase 6 — DC Motor Control (P1)
 
 **Goal**: Drive PicarX DC wheels (and up to 4 motors generically) via the
@@ -230,63 +228,111 @@ implementation) is `REG_CHN + channel`. Discovered during Phase 6 analysis;
 fixed as the first step of this phase.
 
 ### 6.0 — PWM Register Formula Fix (prerequisite)
-- [ ] `hat/pwm.rs`: Fix `set_channel_pulse_us` register: `REG_CHN + channel`
+- [x] `hat/pwm.rs`: Fix `set_channel_pulse_us` register: `REG_CHN + channel`
       (was `REG_CHN + channel * 4`)
-- [ ] Fix `init_pwm` to initialize timers 0–2 (channels 0–11, stride-1 per
+- [x] Fix `init_pwm` to initialize timers 0–2 (channels 0–11, stride-1 per
       timer group) instead of only timers 0 and 4
-- [ ] Add `init_motor_pwm(hat, freq_hz)` — initializes timer 3 (channels 12–15)
-- [ ] Add `set_motor_channel_duty_pct(hat, channel, pct)` — percentage-based
+- [x] Add `init_motor_pwm(hat, freq_hz)` — initializes timer 3 (channels 12–15)
+- [x] Add `set_motor_channel_duty_pct(hat, channel, pct)` — percentage-based
       duty write for motor channels 12–15 (bypasses servo pulse-width path)
-- [ ] Add `MOTOR_FREQ`, `MOTOR_MIN_CHANNEL`, `MOTOR_MAX_CHANNEL` constants
-- [ ] Update all affected unit tests
+- [x] Add `MOTOR_FREQ`, `MOTOR_MIN_CHANNEL`, `MOTOR_MAX_CHANNEL` constants
+- [x] Update all affected unit tests
 
 ### 6.1 — Motor Config
-- [ ] `config.rs`: `MotorConfig { pwm_channel, dir_pin_bcm, reversed }` struct
-- [ ] `motors: Vec<MotorConfig>` array (up to 4 entries) in `Config`
-- [ ] `motor_default_ttl_ms: u64` field in `Config`
-- [ ] Default: PicarX 2-motor wiring
+- [x] `config.rs`: `MotorConfig { pwm_channel, dir_pin_bcm, reversed }` struct
+- [x] `motors: Vec<MotorConfig>` array (up to 4 entries) in `Config`
+- [x] `motor_default_ttl_ms: u64` field in `Config`
+- [x] Default: PicarX 2-motor wiring
   - Motor 0: `pwm_channel=12`, `dir_pin_bcm=24` (D5)
   - Motor 1: `pwm_channel=13`, `dir_pin_bcm=23` (D4)
-- [ ] Validation: `pwm_channel` ∈ 12–15, max 4 motors, `motor_default_ttl_ms > 0`
-- [ ] Update `apply_env_overrides` and config tests
+- [x] Validation: `pwm_channel` ∈ 12–15, max 4 motors, `motor_default_ttl_ms > 0`
+- [x] Update `apply_env_overrides` and config tests
 
 ### 6.2 — GPIO BCM Helper
-- [ ] `hat/gpio.rs`: `write_gpio_bcm(gpio, bcm, high)` — drives an arbitrary
+- [x] `hat/gpio.rs`: `write_gpio_bcm(gpio, bcm, high)` — drives an arbitrary
       BCM output pin (used by motor driver for config-specified direction pins)
 
 ### 6.3 — Motor Driver (`hat/motor.rs`)
-- [ ] New module `hat/motor.rs`
-- [ ] `set_motor_speed(hat, gpio, pwm_channel, dir_pin_bcm, reversed, speed_pct)`:
+- [x] New module `hat/motor.rs`
+- [x] `set_motor_speed(hat, gpio, pwm_channel, dir_pin_bcm, reversed, speed_pct)`:
   - `speed_pct` clamped to −100.0–+100.0 (negative = reverse)
   - Direction computed as `forward = (speed_pct >= 0) XOR reversed`
   - Writes direction GPIO before PWM duty (avoid momentary wrong-direction torque)
-- [ ] `idle_motor(hat, pwm_channel)` — zero duty without touching direction pin
-- [ ] `MotorError { Hat(HatError), Gpio(GpioError) }` error type
-- [ ] Unit tests: forward, backward, stop, reversed flag, speed clamping,
+- [x] `idle_motor(hat, pwm_channel)` — zero duty without touching direction pin
+- [x] `MotorError { Hat(HatError), Gpio(GpioError) }` error type
+- [x] Unit tests: forward, backward, stop, reversed flag, speed clamping,
       invalid channel rejection
 
 ### 6.4 — Motor IPC Methods
-- [ ] `set_motor_speed`: `{ channel, speed_pct, ttl_ms? }` — IPC channel 0–3
+- [x] `set_motor_speed`: `{ channel, speed_pct, ttl_ms? }` — IPC channel 0–3
       maps to `config.motors[channel]`
-- [ ] `stop_all_motors`: `{}` — idle all configured motors, clear motor leases
-- [ ] `get_motor_status`: returns active motor leases
-- [ ] Wired up in `ipc/handler.rs` with `motor_lease_manager: Arc<LeaseManager>`
-- [ ] Motor channels idled on client disconnect (same pattern as servos)
-- [ ] `motor_error_code()` helper for IPC error classification
+- [x] `stop_all_motors`: `{}` — idle all configured motors, clear motor leases
+- [x] `get_motor_status`: returns active motor leases
+- [x] Wired up in `ipc/handler.rs` with `motor_lease_manager: Arc<LeaseManager>`
+- [x] Motor channels idled on client disconnect (same pattern as servos)
+- [x] `motor_error_code()` helper for IPC error classification
 
 ### 6.5 — Motor Watchdog
-- [ ] `servo.rs`: add `revoke_channel(channel)` to `LeaseManager`
-- [ ] `ipc/mod.rs`: poll motor leases in `watchdog_task`; call `idle_motor` on expiry
+- [x] `servo.rs`: add `revoke_channel(channel)` to `LeaseManager`
+- [x] `ipc/mod.rs`: poll motor leases in `watchdog_task`; call `idle_motor` on expiry
 
 ### 6.6 — Startup Init
-- [ ] `main.rs`: call `pwm::init_motor_pwm` when `config.motors` is non-empty
+- [x] `main.rs`: call `pwm::init_motor_pwm` when `config.motors` is non-empty
 
 ### Phase 6 Exit Criteria
-- [ ] `set_motor_speed` drives wheels via IPC with signed-percentage control
-- [ ] TTL watchdog stops motors on lease expiry
-- [ ] Client disconnect stops all held motor channels
-- [ ] All tests pass without hardware
-- [ ] `config.toml.example` documents motor wiring
+- [x] `set_motor_speed` drives wheels via IPC with signed-percentage control
+- [x] TTL watchdog stops motors on lease expiry
+- [x] Client disconnect stops all held motor channels
+- [x] All tests pass without hardware
+- [x] `config.toml.example` documents motor wiring
+
+---
+
+## Phase 7 — Vehicle Convenience Methods (P1)
+
+**Goal**: High-level IPC methods that operate on named peripherals (steering
+servo, camera servos, all motors together, grayscale sensors) using a single,
+coordinated IPC call. Channel-to-peripheral mappings are defined in
+`config.toml` so the daemon is the single source of truth.
+
+### 7.1 — Named Peripheral Config
+- [x] `config.rs`: `ServoChannels { camera_pan, camera_tilt, steering }` struct
+  - Each field is `Option<u8>`, allowing individual servos to be disabled
+  - Defaults: `camera_pan=Some(0)`, `camera_tilt=Some(1)`, `steering=Some(2)`
+  - Validation: channel must be in 0–11 range when `Some`
+- [x] `config.rs`: `SensorChannels { grayscale: [u8; 3] }` struct
+  - Default: `[0, 1, 2]` (A0 = left, A1 = centre, A2 = right for PicarX)
+  - Validation: each channel must be in 0–7 range
+- [x] Both structs added to `Config`; `config.toml.example` updated with
+      `[servos]` and `[sensors]` sections
+
+### 7.2 — Drive IPC Method
+- [x] `drive { speed_pct, ttl_ms? }`: set all configured motors simultaneously
+  - Atomic — no inter-motor gap or round trips
+  - Returns `{ speed_pct, motors: N }`
+
+### 7.3 — Named Servo IPC Methods
+- [x] `steer { angle_deg, ttl_ms? }`: set steering servo (`config.servos.steering`)
+- [x] `pan_camera { angle_deg, ttl_ms? }`: set camera pan (`config.servos.camera_pan`)
+- [x] `tilt_camera { angle_deg, ttl_ms? }`: set camera tilt (`config.servos.camera_tilt`)
+- [x] All three return `{ servo, channel, angle_deg, pulse_us }`
+- [x] `INVALID_PARAMS` returned if the named servo is disabled (`None`)
+
+### 7.4 — Grayscale Sensor IPC Method
+- [x] `read_grayscale {}`: read all three grayscale ADC channels in one call
+  - Channel indices taken from `config.sensors.grayscale`
+  - Returns `{ channels: [u8; 3], values: [u16; 3] }`
+
+### 7.5 — Tests
+- [x] config.rs: 6 new unit tests for ServoChannels/SensorChannels validation
+- [x] handler.rs: 10 new unit tests for all 5 new IPC methods
+
+### Phase 7 Exit Criteria
+- [x] All 5 new IPC methods work via socket
+- [x] Named peripheral channels configurable in `config.toml`
+- [x] All tests pass without hardware (138 total)
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
 
 ---
 
@@ -307,4 +353,5 @@ fixed as the first step of this phase.
 | 3 | PWM & Servo Control | ✅ Complete | 62 |
 | 4 | GPIO & MCU Reset | ✅ Complete | 82 |
 | 5 | Hardening & Deployment | ✅ Complete | 89 |
-| 6 | DC Motor Control | 🚧 In Progress | — |
+| 6 | DC Motor Control | ✅ Complete | 112 |
+| 7 | Vehicle Convenience Methods | ✅ Complete | 138 |
