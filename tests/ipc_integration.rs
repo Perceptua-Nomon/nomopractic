@@ -302,8 +302,8 @@ async fn serve_rejects_symlink_at_socket_path() {
 
 #[tokio::test]
 async fn get_battery_voltage_over_socket() {
-    // raw = 0x0001 = 1 → voltage_v = 1 × 3.0 = 3.0
-    let (config, shutdown_tx, handle, _dir) = start_test_server_with_adc(0x00, 0x01).await;
+    // raw = 0x0FFF = 4095 (12-bit max) → voltage_v = (4095/4095) × 3.3 × 3.0 = 9.9 V
+    let (config, shutdown_tx, handle, _dir) = start_test_server_with_adc(0x0F, 0xFF).await;
 
     let stream = UnixStream::connect(&config.socket_path).await.unwrap();
     let mut reader = BufReader::new(stream);
@@ -316,7 +316,7 @@ async fn get_battery_voltage_over_socket() {
 
     assert_eq!(resp["id"], "bat1");
     assert_eq!(resp["ok"], true);
-    assert_eq!(resp["result"]["voltage_v"], 3.0_f64);
+    assert_eq!(resp["result"]["voltage_v"], 9.9_f64);
 
     let _ = shutdown_tx.send(true);
     drop(reader);

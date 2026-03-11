@@ -545,15 +545,15 @@ mod tests {
 
     #[tokio::test]
     async fn get_battery_voltage_returns_scaled_voltage() {
-        // raw = 0x0001 = 1 → voltage_v = 1 × 3.0 = 3.0
-        let handler = test_handler_with_adc(0x00, 0x01);
+        // raw = 0x0FFF = 4095 (12-bit max) → voltage_v = (4095/4095) × 3.3 × 3.0 = 9.9 V
+        let handler = test_handler_with_adc(0x0F, 0xFF);
         let raw = r#"{"id":"5","method":"get_battery_voltage","params":{}}"#;
         let resp_str = handler.dispatch(raw, 0).await;
         let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
         assert_eq!(resp["id"], "5");
         assert_eq!(resp["ok"], true);
-        assert_eq!(resp["result"]["voltage_v"], 3.0_f64);
+        assert_eq!(resp["result"]["voltage_v"], 9.9_f64);
     }
 
     #[tokio::test]
