@@ -1,7 +1,6 @@
 // Request dispatch — routes method names to HAT driver functions.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -19,6 +18,12 @@ use crate::reset;
 
 /// Minimum interval between consecutive MCU reset requests (ms).
 const RESET_MIN_INTERVAL_MS: u64 = 1000;
+
+/// Snapshot of MCU reset state, kept under a single mutex for consistency.
+struct McuState {
+    reset_count: u64,
+    last_reset_at: Option<Instant>,
+}
 
 /// Classify a `HatError` into an IPC error code string.
 fn hat_error_code(e: &HatError) -> &'static str {
@@ -46,8 +51,7 @@ pub struct Handler {
     hat: Arc<Hat>,
     lease_manager: Arc<LeaseManager>,
     gpio: Arc<HatGpio>,
-    last_reset_at: tokio::sync::Mutex<Option<Instant>>,
-    reset_count: AtomicU64,
+    mcu_state: tokio::sync::Mutex<McuState>,
 }
 
 impl Handler {
@@ -58,8 +62,10 @@ impl Handler {
             hat,
             lease_manager: Arc::new(LeaseManager::new()),
             gpio,
-            last_reset_at: tokio::sync::Mutex::new(None),
-            reset_count: AtomicU64::new(0),
+            mcu_state: tokio::sync::Mutex::new(McuState {
+                reset_count: 0,
+                last_reset_at: None,
+            }),
         }
     }
 
@@ -323,12 +329,11 @@ impl Handler {
         {
             // Check the rate-limit and release the lock before the reset so
             // that `reset_mcu` (which acquires `gpio.bus`) is not executed
-            // under `last_reset_at` — the two locks are independent and this
-            // avoids holding `last_reset_at` across an async sleep.
-            // The lock is re-acquired below only on success; a failed attempt
-            // therefore does not block a retry.
-            let guard = self.last_reset_at.lock().await;
-            if let Some(last) = *guard {
+            // under `mcu_state` — this avoids holding the lock across an
+            // async sleep.  The lock is re-acquired below only on success;
+            // a failed attempt therefore does not block a retry.
+            let guard = self.mcu_state.lock().await;
+            if let Some(last) = guard.last_reset_at {
                 let elapsed_ms = now
                     .checked_duration_since(last)
                     .unwrap_or(Duration::ZERO)
@@ -345,8 +350,9 @@ impl Handler {
         }
         match reset::reset_mcu(&self.gpio).await {
             Ok(result) => {
-                *self.last_reset_at.lock().await = Some(now);
-                self.reset_count.fetch_add(1, Ordering::Release);
+                let mut guard = self.mcu_state.lock().await;
+                guard.last_reset_at = Some(now);
+                guard.reset_count += 1;
                 Response::ok(request.id.clone(), json!({ "reset_ms": result.reset_ms }))
             }
             Err(e) => {
@@ -371,11 +377,9 @@ impl Handler {
     }
 
     async fn handle_get_mcu_status(&self, request: &Request) -> Response {
-        let resets = self.reset_count.load(Ordering::Acquire);
-        let last_reset_s_ago = {
-            let guard = self.last_reset_at.lock().await;
-            guard.map(|t| t.elapsed().as_secs())
-        };
+        let guard = self.mcu_state.lock().await;
+        let resets = guard.reset_count;
+        let last_reset_s_ago = guard.last_reset_at.map(|t| t.elapsed().as_secs());
         Response::ok(
             request.id.clone(),
             json!({

@@ -14,10 +14,10 @@ use tokio::time::{Duration, Instant};
 
 use crate::hat::i2c::{Hat, HatError};
 use crate::hat::pwm;
+use crate::hat::pwm::MAX_CHANNEL;
 
 const MIN_PULSE_US: u16 = 500;
 const MAX_PULSE_US: u16 = 2500;
-use crate::hat::pwm::MAX_CHANNEL;
 const MIN_ANGLE: f64 = 0.0;
 const MAX_ANGLE: f64 = 180.0;
 
