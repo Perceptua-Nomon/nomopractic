@@ -26,7 +26,7 @@ const PERIOD: u16 = 4095;
 /// Default servo PWM frequency (Hz).
 pub const SERVO_FREQ: u32 = 50;
 
-const MAX_CHANNEL: u8 = 11;
+pub const MAX_CHANNEL: u8 = 11;
 
 /// Initialize the PWM timer at the given frequency (Hz).
 ///
