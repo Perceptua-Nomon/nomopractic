@@ -454,7 +454,7 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("speed_pct {s} is out of range −100.0–100.0"),
+                    format!("speed_pct {s} is out of range -100.0..100.0"),
                 );
             }
             None => {
