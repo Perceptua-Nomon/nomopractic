@@ -60,7 +60,7 @@ Once pushed, the **CI → cross → release** workflow chain runs automatically.
 Monitor progress at:
 
 ```
-https://github.com/Perceptua/nomopractic/actions
+https://github.com/Perceptua-Nomon/nomopractic/actions
 ```
 
 The release is ready when the `Publish GitHub Release` job completes (~5–8 min
@@ -155,7 +155,7 @@ Then verify the service is healthy as above.
 |----------|---------|---------|
 | `NOMON_PI_HOST` | _(none)_ | SSH target; overridden by the second positional arg |
 | `NOMON_SSH_KEY` | _(none)_ | Path to SSH private key for the deploy connection |
-| `NOMON_GITHUB_REPO` | `Perceptua/nomopractic` | GitHub `owner/repo` slug for asset downloads |
+| `NOMON_GITHUB_REPO` | `Perceptua-Nomon/nomopractic` | GitHub `owner/repo` slug for asset downloads |
 | `NOMON_HAT_SOCKET_PATH` | `/run/nomopractic/nomopractic.sock` | Socket path used by `nomothetic.hat.HatClient` |
 
 ---

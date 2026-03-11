@@ -112,7 +112,7 @@ HatClient (Python)
   → ipc → handler → hat::battery::read_voltage()
   → hat::adc::read_channel(A4)
   → hat::i2c::write + read (0x14)
-  → raw_adc × 3 = voltage_v
+  → raw_adc: (raw / 4095) × 3.3 × 3.0 = voltage_v
   → {"id":"2","ok":true,"result":{"voltage_v":7.42}}
 ```
 

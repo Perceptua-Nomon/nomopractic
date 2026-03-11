@@ -12,7 +12,7 @@
 # Environment:
 #   NOMON_PI_HOST       SSH target (overridden by second arg)
 #   NOMON_SSH_KEY       Path to SSH private key (optional)
-#   NOMON_GITHUB_REPO   GitHub "owner/repo" slug. Default: Perceptua/nomopractic
+#   NOMON_GITHUB_REPO   GitHub "owner/repo" slug. Default: Perceptua-Nomon/nomopractic
 #
 # Examples:
 #   # Deploy from a dev machine to a Pi over SSH:
@@ -42,7 +42,7 @@ set -euo pipefail
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-REPO="${NOMON_GITHUB_REPO:-Perceptua/nomopractic}"
+REPO="${NOMON_GITHUB_REPO:-Perceptua-Nomon/nomopractic}"
 INSTALL_PATH="/usr/local/bin/nomopractic"
 SERVICE="nomopractic"
 DOWNLOAD_DIR="$(mktemp -d)"
