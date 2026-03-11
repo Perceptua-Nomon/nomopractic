@@ -50,6 +50,17 @@ async fn main() -> anyhow::Result<()> {
 
     info!("PWM initialized at {} Hz", pwm::SERVO_FREQ);
 
+    if !config.motors.is_empty() {
+        pwm::init_motor_pwm(&hat, pwm::MOTOR_FREQ)
+            .await
+            .map_err(|e| anyhow::anyhow!("Motor PWM init failed: {e}"))?;
+        info!(
+            "Motor PWM initialized at {} Hz ({} motor(s) configured)",
+            pwm::MOTOR_FREQ,
+            config.motors.len()
+        );
+    }
+
     let gpio = Arc::new(HatGpio::new(
         RppalGpio::open().map_err(|e| anyhow::anyhow!("GPIO init failed: {e}"))?,
     ));

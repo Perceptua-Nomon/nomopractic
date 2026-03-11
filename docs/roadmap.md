@@ -214,6 +214,82 @@ hardware interaction.
 
 ---
 
+---
+
+## Phase 6 — DC Motor Control (P1)
+
+**Goal**: Drive PicarX DC wheels (and up to 4 motors generically) via the
+Robot HAT V4 TC1508S H-bridge driver. Includes TTL lease watchdog (same
+safety model as servos) and config-driven wiring.
+
+**Pre-requisite bug fix (6.0)**: The existing `set_channel_pulse_us` register
+formula `REG_CHN + channel * 4` is only correct for channel 0; channels 1–11
+compute the wrong register address, and channels 12–13 collide with timer
+config registers. The correct formula (from the SunFounder reference
+implementation) is `REG_CHN + channel`. Discovered during Phase 6 analysis;
+fixed as the first step of this phase.
+
+### 6.0 — PWM Register Formula Fix (prerequisite)
+- [ ] `hat/pwm.rs`: Fix `set_channel_pulse_us` register: `REG_CHN + channel`
+      (was `REG_CHN + channel * 4`)
+- [ ] Fix `init_pwm` to initialize timers 0–2 (channels 0–11, stride-1 per
+      timer group) instead of only timers 0 and 4
+- [ ] Add `init_motor_pwm(hat, freq_hz)` — initializes timer 3 (channels 12–15)
+- [ ] Add `set_motor_channel_duty_pct(hat, channel, pct)` — percentage-based
+      duty write for motor channels 12–15 (bypasses servo pulse-width path)
+- [ ] Add `MOTOR_FREQ`, `MOTOR_MIN_CHANNEL`, `MOTOR_MAX_CHANNEL` constants
+- [ ] Update all affected unit tests
+
+### 6.1 — Motor Config
+- [ ] `config.rs`: `MotorConfig { pwm_channel, dir_pin_bcm, reversed }` struct
+- [ ] `motors: Vec<MotorConfig>` array (up to 4 entries) in `Config`
+- [ ] `motor_default_ttl_ms: u64` field in `Config`
+- [ ] Default: PicarX 2-motor wiring
+  - Motor 0: `pwm_channel=12`, `dir_pin_bcm=24` (D5)
+  - Motor 1: `pwm_channel=13`, `dir_pin_bcm=23` (D4)
+- [ ] Validation: `pwm_channel` ∈ 12–15, max 4 motors, `motor_default_ttl_ms > 0`
+- [ ] Update `apply_env_overrides` and config tests
+
+### 6.2 — GPIO BCM Helper
+- [ ] `hat/gpio.rs`: `write_gpio_bcm(gpio, bcm, high)` — drives an arbitrary
+      BCM output pin (used by motor driver for config-specified direction pins)
+
+### 6.3 — Motor Driver (`hat/motor.rs`)
+- [ ] New module `hat/motor.rs`
+- [ ] `set_motor_speed(hat, gpio, pwm_channel, dir_pin_bcm, reversed, speed_pct)`:
+  - `speed_pct` clamped to −100.0–+100.0 (negative = reverse)
+  - Direction computed as `forward = (speed_pct >= 0) XOR reversed`
+  - Writes direction GPIO before PWM duty (avoid momentary wrong-direction torque)
+- [ ] `idle_motor(hat, pwm_channel)` — zero duty without touching direction pin
+- [ ] `MotorError { Hat(HatError), Gpio(GpioError) }` error type
+- [ ] Unit tests: forward, backward, stop, reversed flag, speed clamping,
+      invalid channel rejection
+
+### 6.4 — Motor IPC Methods
+- [ ] `set_motor_speed`: `{ channel, speed_pct, ttl_ms? }` — IPC channel 0–3
+      maps to `config.motors[channel]`
+- [ ] `stop_all_motors`: `{}` — idle all configured motors, clear motor leases
+- [ ] `get_motor_status`: returns active motor leases
+- [ ] Wired up in `ipc/handler.rs` with `motor_lease_manager: Arc<LeaseManager>`
+- [ ] Motor channels idled on client disconnect (same pattern as servos)
+- [ ] `motor_error_code()` helper for IPC error classification
+
+### 6.5 — Motor Watchdog
+- [ ] `servo.rs`: add `revoke_channel(channel)` to `LeaseManager`
+- [ ] `ipc/mod.rs`: poll motor leases in `watchdog_task`; call `idle_motor` on expiry
+
+### 6.6 — Startup Init
+- [ ] `main.rs`: call `pwm::init_motor_pwm` when `config.motors` is non-empty
+
+### Phase 6 Exit Criteria
+- [ ] `set_motor_speed` drives wheels via IPC with signed-percentage control
+- [ ] TTL watchdog stops motors on lease expiry
+- [ ] Client disconnect stops all held motor channels
+- [ ] All tests pass without hardware
+- [ ] `config.toml.example` documents motor wiring
+
+---
+
 ## Priority Legend
 
 | Label | Meaning |
@@ -231,3 +307,4 @@ hardware interaction.
 | 3 | PWM & Servo Control | ✅ Complete | 62 |
 | 4 | GPIO & MCU Reset | ✅ Complete | 82 |
 | 5 | Hardening & Deployment | ✅ Complete | 89 |
+| 6 | DC Motor Control | 🚧 In Progress | — |

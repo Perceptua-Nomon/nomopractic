@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::hat::gpio::HatGpio;
 use crate::hat::i2c::Hat;
+use crate::hat::motor;
 use crate::hat::pwm;
 use handler::Handler;
 
@@ -212,11 +213,22 @@ async fn watchdog_task(
     loop {
         tokio::select! {
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(poll_ms)) => {
+                // Servo watchdog.
                 let expired = handler.lease_manager().poll_expired().await;
                 for ch in expired {
                     warn!(channel = ch, "servo lease expired; idling channel");
                     if let Err(e) = pwm::set_channel_pulse_us(handler.hat(), ch, 0).await {
                         error!(error = %e, channel = ch, "failed to idle expired servo channel");
+                    }
+                }
+                // Motor watchdog.
+                let motor_expired = handler.motor_lease_manager().poll_expired().await;
+                for ipc_ch in motor_expired {
+                    warn!(channel = ipc_ch, "motor lease expired; stopping motor");
+                    if let Some(cfg) = handler.config().motors.get(ipc_ch as usize)
+                        && let Err(e) = motor::idle_motor(handler.hat(), cfg.pwm_channel).await
+                    {
+                        error!(error = %e, channel = ipc_ch, "failed to stop expired motor");
                     }
                 }
             }

@@ -127,6 +127,14 @@ impl LeaseManager {
         expired
     }
 
+    /// Remove the lease for a single channel, regardless of TTL or connection.
+    ///
+    /// Used by `stop_all_motors` (and equivalent convenience methods) to
+    /// immediately discard a lease without waiting for expiry.
+    pub async fn revoke_channel(&self, channel: u8) {
+        self.leases.lock().await.remove(&channel);
+    }
+
     /// Returns `(channel, ttl_remaining_ms, conn_id)` for every lease that
     /// has not yet expired.
     pub async fn get_active_leases(&self) -> Vec<(u8, u64, u64)> {

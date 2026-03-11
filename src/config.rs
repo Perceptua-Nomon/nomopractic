@@ -22,6 +22,21 @@ pub enum ConfigError {
     Validation { field: &'static str, reason: String },
 }
 
+/// Configuration for a single motor channel.
+///
+/// Each entry maps an IPC motor index (position in the `motors` array, 0-based)
+/// to a Robot HAT V4 PWM channel and a BCM GPIO direction pin.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MotorConfig {
+    /// HAT PWM channel for motor speed control (12–15).
+    pub pwm_channel: u8,
+    /// BCM GPIO pin number for motor direction (HIGH = forward, LOW = backward).
+    pub dir_pin_bcm: u8,
+    /// Invert the direction signal for this motor (wired with reversed polarity).
+    #[serde(default)]
+    pub reversed: bool,
+}
+
 /// Daemon configuration.
 ///
 /// Loaded from TOML file, overridden by `NOMON_HAT_*` environment variables.
@@ -34,7 +49,11 @@ pub struct Config {
     pub socket_mode: u32,
     pub log_level: String,
     pub servo_default_ttl_ms: u64,
+    pub motor_default_ttl_ms: u64,
     pub watchdog_poll_ms: u64,
+    /// Motor channel configurations (up to 4).  Positions in the Vec are the
+    /// IPC motor indices (0-based) used in `set_motor_speed` requests.
+    pub motors: Vec<MotorConfig>,
 }
 
 impl Default for Config {
@@ -46,7 +65,23 @@ impl Default for Config {
             socket_mode: 0o660,
             log_level: "info".into(),
             servo_default_ttl_ms: 500,
+            motor_default_ttl_ms: 500,
             watchdog_poll_ms: 100,
+            // PicarX default wiring: motor 0 = P12/D5, motor 1 = P13/D4.
+            // Motor 1 is physically mounted with reversed polarity on PicarX,
+            // so positive speed_pct corresponds to forward for both motors.
+            motors: vec![
+                MotorConfig {
+                    pwm_channel: 12,
+                    dir_pin_bcm: 24, // D5
+                    reversed: false,
+                },
+                MotorConfig {
+                    pwm_channel: 13,
+                    dir_pin_bcm: 23, // D4
+                    reversed: true,
+                },
+            ],
         }
     }
 }
@@ -113,6 +148,11 @@ impl Config {
         {
             self.servo_default_ttl_ms = n;
         }
+        if let Ok(v) = get_env("NOMON_HAT_MOTOR_DEFAULT_TTL_MS")
+            && let Ok(n) = v.parse()
+        {
+            self.motor_default_ttl_ms = n;
+        }
         if let Ok(v) = get_env("NOMON_HAT_WATCHDOG_POLL_MS")
             && let Ok(n) = v.parse()
         {
@@ -134,6 +174,29 @@ impl Config {
                 field: "servo_default_ttl_ms",
                 reason: "must be > 0".into(),
             });
+        }
+        if self.motor_default_ttl_ms == 0 {
+            return Err(ConfigError::Validation {
+                field: "motor_default_ttl_ms",
+                reason: "must be > 0".into(),
+            });
+        }
+        if self.motors.len() > 4 {
+            return Err(ConfigError::Validation {
+                field: "motors",
+                reason: "at most 4 motor channels are supported".into(),
+            });
+        }
+        for (i, m) in self.motors.iter().enumerate() {
+            if !(12..=15).contains(&m.pwm_channel) {
+                return Err(ConfigError::Validation {
+                    field: "motors[].pwm_channel",
+                    reason: format!(
+                        "motors[{i}].pwm_channel {} is out of range 12–15",
+                        m.pwm_channel
+                    ),
+                });
+            }
         }
         if self.watchdog_poll_ms == 0 {
             return Err(ConfigError::Validation {
@@ -159,7 +222,11 @@ mod tests {
         assert_eq!(config.socket_mode, 0o660);
         assert_eq!(config.log_level, "info");
         assert_eq!(config.servo_default_ttl_ms, 500);
+        assert_eq!(config.motor_default_ttl_ms, 500);
         assert_eq!(config.watchdog_poll_ms, 100);
+        assert_eq!(config.motors.len(), 2);
+        assert_eq!(config.motors[0].pwm_channel, 12);
+        assert_eq!(config.motors[1].pwm_channel, 13);
     }
 
     #[test]
@@ -220,6 +287,58 @@ servo_default_ttl_ms = 1000
         writeln!(f, "watchdog_poll_ms = 0").unwrap();
         let err = Config::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("watchdog_poll_ms"));
+    }
+
+    #[test]
+    fn zero_motor_ttl_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "motor_default_ttl_ms = 0").unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("motor_default_ttl_ms"));
+    }
+
+    #[test]
+    fn invalid_motor_pwm_channel_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "[[motors]]\npwm_channel = 5\ndir_pin_bcm = 24\nreversed = false"
+        )
+        .unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("pwm_channel"));
+    }
+
+    #[test]
+    fn too_many_motors_rejected() {
+        let mut f = NamedTempFile::new().unwrap();
+        for ch in 12u8..=16 {
+            writeln!(f, "[[motors]]\npwm_channel = {ch}\ndir_pin_bcm = 24").unwrap();
+        }
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("motors"));
+    }
+
+    #[test]
+    fn load_motor_config_from_toml() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            r#"
+motor_default_ttl_ms = 750
+[[motors]]
+pwm_channel = 14
+dir_pin_bcm = 23
+reversed = true
+"#
+        )
+        .unwrap();
+        let config = Config::load(f.path()).unwrap();
+        assert_eq!(config.motor_default_ttl_ms, 750);
+        assert_eq!(config.motors.len(), 1);
+        assert_eq!(config.motors[0].pwm_channel, 14);
+        assert_eq!(config.motors[0].dir_pin_bcm, 23);
+        assert!(config.motors[0].reversed);
     }
 
     #[test]

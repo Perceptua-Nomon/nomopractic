@@ -171,6 +171,15 @@ pub async fn read_gpio_pin(gpio: &HatGpio, pin: GpioPin) -> Result<bool, GpioErr
     gpio.bus.lock().await.read_pin(pin.bcm())
 }
 
+/// Drive a GPIO output pin by raw BCM number.
+///
+/// Used by the motor driver for config-specified direction pins that may not
+/// correspond to a named `GpioPin` variant. No read-only check is performed —
+/// callers are responsible for ensuring `bcm` refers to an output-capable pin.
+pub async fn write_gpio_bcm(gpio: &HatGpio, bcm: u8, high: bool) -> Result<(), GpioError> {
+    gpio.bus.lock().await.write_pin(bcm, high)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

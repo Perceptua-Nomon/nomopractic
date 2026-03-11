@@ -1,4 +1,4 @@
-.PHONY: build test check clippy fmt clean release
+.PHONY: build test check clippy fmt clean release coverage
 
 build:
 	cargo build
@@ -13,6 +13,11 @@ fmt:
 	cargo fmt --check
 
 check: fmt clippy test
+
+coverage:
+	rustup component add llvm-tools-preview
+	cargo llvm-cov --html
+	cargo llvm-cov --summary-only
 
 clean:
 	cargo clean
