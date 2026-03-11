@@ -50,9 +50,9 @@ prescaler = CLOCK_HZ / (SERVO_FREQ × PERIOD) - 1
 | Parameter | Value |
 |-----------|-------|
 | Battery channel | A4 |
-| Command byte | `0x14` |
+| Command byte | `0x10 \| (7 - channel)` — e.g. A4 → `0x13` |
 | Read size | 2 bytes (big-endian) |
-| Scaling | `voltage = raw × 3` |
+| Scaling | `voltage_v = (raw / 4095) × 3.3 × 3.0` |
 
 ### ADC Protocol
 

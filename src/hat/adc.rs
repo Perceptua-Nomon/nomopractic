@@ -4,7 +4,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::hat::i2c::{Hat, HatError, write_register};
 
-/// Base command byte; add channel index (0–7) to select the channel.
+/// Base command byte for ADC reads (OR'd with reversed channel index).
 const ADC_CMD_BASE: u8 = 0x10;
 /// Delay between write and read, per hardware specification.
 const ADC_DELAY_MS: u64 = 10;
@@ -12,14 +12,14 @@ const ADC_MAX_CHANNEL: u8 = 7;
 
 /// Read a raw ADC value from the given channel (A0–A7).
 ///
-/// Sends the command byte `0x10 + channel`, waits ~10 ms, then reads the
-/// 2-byte big-endian result from the HAT.
+/// Sends command byte `0x10 | (7 - channel)` (per robot-hat firmware register
+/// map), waits ~10 ms, then reads the 2-byte big-endian result from the HAT.
 pub async fn read_adc(hat: &Hat, channel: u8) -> Result<u16, HatError> {
     if channel > ADC_MAX_CHANNEL {
         return Err(HatError::InvalidChannel(channel));
     }
 
-    let cmd = ADC_CMD_BASE + channel;
+    let cmd = ADC_CMD_BASE | (7 - channel);
 
     {
         let mut bus = hat.bus.lock().await;

@@ -42,7 +42,7 @@ set -euo pipefail
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-REPO="${NOMON_GITHUB_REPO:-Perceptua/nomopractic}"
+REPO="${NOMON_GITHUB_REPO:-Perceptua-Nomon/nomopractic}"
 INSTALL_PATH="/usr/local/bin/nomopractic"
 SERVICE="nomopractic"
 DOWNLOAD_DIR="$(mktemp -d)"

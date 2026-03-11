@@ -82,7 +82,7 @@ hardware interaction.
 
 ### 2.3 — Battery Voltage
 - [x] `hat/battery.rs`: Read ADC channel A4
-- [x] Scaling: `voltage_v = raw_adc × 3`
+- [x] Scaling: `voltage_v = (raw / 4095) × 3.3 × 3.0` (12-bit ADC, 3.3 V ref, 3:1 voltage divider)
 - [x] `get_battery_voltage` IPC method wired up in handler
 - [x] Unit test: mock ADC → verify voltage calculation
 
@@ -165,10 +165,25 @@ hardware interaction.
 - [x] Rollback support (keep previous binary as `nomopractic.bak`)
 
 ### 5.3 — Integration Testing on Pi
-- [ ] End-to-end test: start daemon → connect via socket → verify HAT responses
-- [ ] Battery voltage sanity check (voltage in expected range)
-- [ ] Servo sweep test (0° → 180° → 0°)
-- [ ] MCU reset test
+- [x] End-to-end test: start daemon → connect via socket → verify HAT responses
+- [x] Battery voltage sanity check (voltage in expected range)
+- [x] Servo sweep test (0° → 180° → 0°)
+- [x] MCU reset test
+
+**Results (v0.1.0, 2026-03-10, Pi Zero 2W / PicarX):**
+
+| Test | Result | Notes |
+|------|--------|-------|
+| T1 Health | PASS | `status:ok`, `schema_version:1.0.0`, `hat_address:0x14` |
+| T2 Battery voltage | PASS | `raw:3329`, `voltage_v:8.06 V` (2S LiPo, healthy) |
+| T3 Servo sweep | PASS | P0: 0°→180°→90°, pulses 500/2500/1500 µs, physical movement confirmed |
+| T4 MCU reset | PASS | `reset_ms:10` |
+| T5 Post-reset health | PASS | Daemon survived reset, `uptime_s:934` |
+
+**Bugs found and fixed during testing:**
+- ADC command byte was `0x10 + channel`; correct formula is `0x10 \| (7 - channel)` (robot-hat register map)
+- Battery scaling was `raw × 3`; correct formula is `(raw / 4095) × 3.3 × 3.0` (12-bit ADC, 3.3 V ref, 3:1 divider)
+- Single-shot `socat` kills servo immediately via TTL-on-disconnect; use a persistent connection for servo testing
 
 ### 5.4 — Raw ADC IPC Method
 - [x] `read_adc` IPC method: expose raw ADC reads for all channels A0–A7
@@ -215,4 +230,4 @@ hardware interaction.
 | 2 | I2C & Battery Voltage | ✅ Complete | 31 |
 | 3 | PWM & Servo Control | ✅ Complete | 62 |
 | 4 | GPIO & MCU Reset | ✅ Complete | 82 |
-| 5 | Hardening & Deployment | 🔄 In Progress | 89 |
+| 5 | Hardening & Deployment | ✅ Complete | 89 |
