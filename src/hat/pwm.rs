@@ -48,7 +48,7 @@ pub const MOTOR_MAX_CHANNEL: u8 = 15;
 /// Must be called once before any `set_channel_pulse_us` calls.
 pub async fn init_pwm(hat: &Hat, freq_hz: u32) -> Result<(), HatError> {
     if freq_hz == 0 {
-        return Err(HatError::I2c("PWM frequency must be > 0".into()));
+        return Err(HatError::InvalidParam("PWM frequency must be > 0".into()));
     }
     let prescaler = ((CLOCK_HZ / (freq_hz as u64 * PERIOD as u64)).saturating_sub(1)) as u16;
     let arr = PERIOD;
@@ -75,7 +75,9 @@ pub async fn init_pwm(hat: &Hat, freq_hz: u32) -> Result<(), HatError> {
 /// Must be called once before any `set_motor_channel_duty_pct` calls.
 pub async fn init_motor_pwm(hat: &Hat, freq_hz: u32) -> Result<(), HatError> {
     if freq_hz == 0 {
-        return Err(HatError::I2c("motor PWM frequency must be > 0".into()));
+        return Err(HatError::InvalidParam(
+            "motor PWM frequency must be > 0".into(),
+        ));
     }
     let prescaler = ((CLOCK_HZ / (freq_hz as u64 * PERIOD as u64)).saturating_sub(1)) as u16;
     let arr = PERIOD;
@@ -205,6 +207,22 @@ mod tests {
         // Timer 3 prescaler (0x43) + ARR (0x47)
         assert_eq!(writes[0], (0x14, vec![REG_PSC + 3, 0x00, 0xAE]));
         assert_eq!(writes[1], (0x14, vec![REG_ARR + 3, 0x0F, 0xFF]));
+    }
+
+    #[tokio::test]
+    async fn init_motor_pwm_zero_freq_returns_invalid_param() {
+        let (mock, _log) = MockI2c::new();
+        let hat = Hat::new(mock, 0x14);
+        let err = init_motor_pwm(&hat, 0).await.unwrap_err();
+        assert!(matches!(err, HatError::InvalidParam(_)));
+    }
+
+    #[tokio::test]
+    async fn init_pwm_zero_freq_returns_invalid_param() {
+        let (mock, _log) = MockI2c::new();
+        let hat = Hat::new(mock, 0x14);
+        let err = init_pwm(&hat, 0).await.unwrap_err();
+        assert!(matches!(err, HatError::InvalidParam(_)));
     }
 
     // ------------------------------------------------------------------

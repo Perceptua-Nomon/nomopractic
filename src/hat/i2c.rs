@@ -19,6 +19,8 @@ pub enum HatError {
     InvalidPulse(u16),
     #[error("invalid angle {0}°: must be 0.0–180.0")]
     InvalidAngle(f64),
+    #[error("invalid parameter: {0}")]
+    InvalidParam(String),
 }
 
 /// Abstraction over raw I2C bus operations, enabling mock injection in tests.

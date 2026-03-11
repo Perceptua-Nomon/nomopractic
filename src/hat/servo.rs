@@ -127,6 +127,22 @@ impl LeaseManager {
         expired
     }
 
+    /// Return the channel numbers whose leases have expired, **without** removing them.
+    ///
+    /// Use this in watchdog loops that should only discard a lease after the
+    /// hardware stop succeeds.  Call `revoke_channel` explicitly once the motor
+    /// (or servo) has been successfully idled.
+    pub async fn peek_expired(&self) -> Vec<u8> {
+        let now = Instant::now();
+        self.leases
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, e)| e.expires_at <= now)
+            .map(|(&ch, _)| ch)
+            .collect()
+    }
+
     /// Remove the lease for a single channel, regardless of TTL or connection.
     ///
     /// Used by `stop_all_motors` (and equivalent convenience methods) to
@@ -307,5 +323,25 @@ mod tests {
         // conn 2 does
         let released2 = manager.release_connection(2).await;
         assert!(released2.contains(&7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peek_expired_returns_channel_without_removing_lease() {
+        let manager = LeaseManager::new();
+        manager.set_lease(3, 1, 100).await;
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+
+        // peek returns the expired channel
+        let peeked = manager.peek_expired().await;
+        assert_eq!(peeked, vec![3]);
+
+        // but the lease is still present — a second peek returns the same channel
+        let peeked_again = manager.peek_expired().await;
+        assert_eq!(peeked_again, vec![3]);
+
+        // revoke_channel removes it
+        manager.revoke_channel(3).await;
+        assert!(manager.peek_expired().await.is_empty());
     }
 }

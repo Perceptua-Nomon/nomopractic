@@ -222,13 +222,18 @@ async fn watchdog_task(
                     }
                 }
                 // Motor watchdog.
-                let motor_expired = handler.motor_lease_manager().poll_expired().await;
+                let motor_expired = handler.motor_lease_manager().peek_expired().await;
                 for ipc_ch in motor_expired {
                     warn!(channel = ipc_ch, "motor lease expired; stopping motor");
-                    if let Some(cfg) = handler.config().motors.get(ipc_ch as usize)
-                        && let Err(e) = motor::idle_motor(handler.hat(), cfg.pwm_channel).await
-                    {
-                        error!(error = %e, channel = ipc_ch, "failed to stop expired motor");
+                    if let Some(cfg) = handler.config().motors.get(ipc_ch as usize) {
+                        match motor::idle_motor(handler.hat(), cfg.pwm_channel).await {
+                            Ok(()) => {
+                                handler.motor_lease_manager().revoke_channel(ipc_ch).await;
+                            }
+                            Err(e) => {
+                                error!(error = %e, channel = ipc_ch, "failed to stop expired motor; will retry");
+                            }
+                        }
                     }
                 }
             }
