@@ -1587,12 +1587,18 @@ mod tests {
         let bcm = handler.config().speaker_en_pin_bcm;
         // After enable, the speaker enable pin must be high (read via gpio mock).
         let pin_high = handler.gpio.bus.lock().await.read_pin(bcm).unwrap();
-        assert!(pin_high, "speaker enable pin should be HIGH after enable_speaker");
+        assert!(
+            pin_high,
+            "speaker enable pin should be HIGH after enable_speaker"
+        );
 
         handler
             .dispatch(r#"{"id":"sp4","method":"disable_speaker","params":{}}"#, 0)
             .await;
         let pin_high = handler.gpio.bus.lock().await.read_pin(bcm).unwrap();
-        assert!(!pin_high, "speaker enable pin should be LOW after disable_speaker");
+        assert!(
+            !pin_high,
+            "speaker enable pin should be LOW after disable_speaker"
+        );
     }
 }
