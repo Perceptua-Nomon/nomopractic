@@ -39,3 +39,15 @@ steering    = 2   # P2 — front-wheel steering servo
 
 [sensors]
 grayscale = [0, 1, 2]   # A0 = left, A1 = centre, A2 = right
+
+# Ultrasonic distance sensor GPIO pin assignments (HC-SR04 compatible).
+# Wiring matches SunFounder PicarX: TRIG → D2 (BCM 27), ECHO → D3 (BCM 22).
+
+[ultrasonic]
+trig_pin_bcm = 27   # D2 — trigger output
+echo_pin_bcm = 22   # D3 — echo input
+timeout_ms   = 20   # abort measurement after this many ms
+
+# Speaker amplifier enable GPIO pin (BCM).
+# On Robot HAT V4 this is BCM 20 (spk_en).  Setting HIGH enables the amplifier.
+speaker_en_pin_bcm = 20

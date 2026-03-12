@@ -79,6 +79,30 @@ impl Default for SensorChannels {
     }
 }
 
+/// Ultrasonic distance sensor GPIO pin assignments.
+///
+/// The HC-SR04-compatible sensor on PicarX uses D2 (BCM 27) for TRIG and
+/// D3 (BCM 22) for ECHO.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UltrasonicConfig {
+    /// BCM GPIO pin for the TRIG output. Default: 27 (D2).
+    pub trig_pin_bcm: u8,
+    /// BCM GPIO pin for the ECHO input. Default: 22 (D3).
+    pub echo_pin_bcm: u8,
+    /// Measurement timeout in milliseconds. Default: 20.
+    pub timeout_ms: u64,
+}
+
+impl Default for UltrasonicConfig {
+    fn default() -> Self {
+        Self {
+            trig_pin_bcm: 27,
+            echo_pin_bcm: 22,
+            timeout_ms: 20,
+        }
+    }
+}
+
 /// Daemon configuration.
 ///
 /// Loaded from TOML file, overridden by `NOMON_HAT_*` environment variables.
@@ -100,6 +124,10 @@ pub struct Config {
     pub servos: ServoChannels,
     /// Named ADC sensor channel assignments.
     pub sensors: SensorChannels,
+    /// Ultrasonic distance sensor GPIO pin assignments.
+    pub ultrasonic: UltrasonicConfig,
+    /// BCM GPIO pin for the speaker amplifier enable signal. Default: 20.
+    pub speaker_en_pin_bcm: u8,
 }
 
 impl Default for Config {
@@ -130,6 +158,8 @@ impl Default for Config {
             ],
             servos: ServoChannels::default(),
             sensors: SensorChannels::default(),
+            ultrasonic: UltrasonicConfig::default(),
+            speaker_en_pin_bcm: 20,
         }
     }
 }

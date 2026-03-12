@@ -14,6 +14,7 @@ use crate::hat::gpio::{self, GpioError, HatGpio};
 use crate::hat::i2c::{Hat, HatError};
 use crate::hat::motor::{self, MotorError};
 use crate::hat::servo::LeaseManager;
+use crate::hat::ultrasonic;
 use crate::hat::{pwm, servo};
 use crate::reset;
 
@@ -167,6 +168,9 @@ impl Handler {
             "pan_camera" => self.handle_pan_camera(&request, conn_id).await,
             "tilt_camera" => self.handle_tilt_camera(&request, conn_id).await,
             "read_grayscale" => self.handle_read_grayscale(&request).await,
+            "read_ultrasonic" => self.handle_read_ultrasonic(&request).await,
+            "enable_speaker" => self.handle_enable_speaker(&request).await,
+            "disable_speaker" => self.handle_disable_speaker(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -740,6 +744,61 @@ impl Handler {
                 "values": [values[0], values[1], values[2]],
             }),
         )
+    }
+
+    /// `read_ultrasonic {}` — trigger the HC-SR04 sensor and return distance in
+    /// centimetres. Uses the TRIG/ECHO BCM pins and timeout from config.
+    async fn handle_read_ultrasonic(&self, request: &Request) -> Response {
+        let cfg = &self.config.ultrasonic;
+        match ultrasonic::read_distance_cm(
+            &self.gpio,
+            cfg.trig_pin_bcm,
+            cfg.echo_pin_bcm,
+            cfg.timeout_ms,
+        )
+        .await
+        {
+            Ok(distance_cm) => {
+                Response::ok(request.id.clone(), json!({ "distance_cm": distance_cm }))
+            }
+            Err(ultrasonic::UltrasonicError::Timeout(ms)) => Response::err(
+                request.id.clone(),
+                "HARDWARE_ERROR",
+                format!("ultrasonic measurement timed out after {ms} ms"),
+            ),
+            Err(ultrasonic::UltrasonicError::NoEcho) => Response::err(
+                request.id.clone(),
+                "HARDWARE_ERROR",
+                "no valid echo received (object out of sensor range 2–400 cm)",
+            ),
+            Err(ultrasonic::UltrasonicError::Gpio(e)) => {
+                Response::err(request.id.clone(), gpio_error_code(&e), e.to_string())
+            }
+        }
+    }
+
+    /// `enable_speaker {}` — assert the speaker-amplifier enable pin HIGH.
+    async fn handle_enable_speaker(&self, request: &Request) -> Response {
+        let bcm = self.config.speaker_en_pin_bcm;
+        match self.gpio.bus.lock().await.write_pin(bcm, true) {
+            Ok(()) => Response::ok(
+                request.id.clone(),
+                json!({ "enabled": true, "pin_bcm": bcm }),
+            ),
+            Err(e) => Response::err(request.id.clone(), gpio_error_code(&e), e.to_string()),
+        }
+    }
+
+    /// `disable_speaker {}` — pull the speaker-amplifier enable pin LOW.
+    async fn handle_disable_speaker(&self, request: &Request) -> Response {
+        let bcm = self.config.speaker_en_pin_bcm;
+        match self.gpio.bus.lock().await.write_pin(bcm, false) {
+            Ok(()) => Response::ok(
+                request.id.clone(),
+                json!({ "enabled": false, "pin_bcm": bcm }),
+            ),
+            Err(e) => Response::err(request.id.clone(), gpio_error_code(&e), e.to_string()),
+        }
     }
 }
 
@@ -1357,5 +1416,53 @@ mod tests {
 
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    // ------------------------------------------------------------------
+    // Speaker
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn enable_speaker_returns_enabled_true() {
+        let handler = test_handler();
+        let raw = r#"{"id":"sp1","method":"enable_speaker","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "sp1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["enabled"], true);
+        // Default speaker_en_pin_bcm is 20.
+        assert_eq!(resp["result"]["pin_bcm"], 20);
+    }
+
+    #[tokio::test]
+    async fn disable_speaker_returns_enabled_false() {
+        let handler = test_handler();
+        let raw = r#"{"id":"sp2","method":"disable_speaker","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "sp2");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["enabled"], false);
+        assert_eq!(resp["result"]["pin_bcm"], 20);
+    }
+
+    #[tokio::test]
+    async fn enable_then_disable_speaker_toggles_pin() {
+        let handler = test_handler();
+        handler
+            .dispatch(r#"{"id":"sp3","method":"enable_speaker","params":{}}"#, 0)
+            .await;
+        // After enable, pin 20 must be high (read via gpio mock).
+        let pin_high = handler.gpio.bus.lock().await.read_pin(20).unwrap();
+        assert!(pin_high, "BCM 20 should be HIGH after enable_speaker");
+
+        handler
+            .dispatch(r#"{"id":"sp4","method":"disable_speaker","params":{}}"#, 0)
+            .await;
+        let pin_high = handler.gpio.bus.lock().await.read_pin(20).unwrap();
+        assert!(!pin_high, "BCM 20 should be LOW after disable_speaker");
     }
 }

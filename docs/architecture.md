@@ -73,7 +73,9 @@ main.rs
   │   ├── adc.rs          (ADC command + read)
   │   ├── servo.rs        (angle ↔ pulse, TTL lease watchdog)
   │   ├── battery.rs      (ADC A4 → voltage)
-  │   └── gpio.rs         (named pin abstraction)
+  │   ├── motor.rs        (H-bridge dir GPIO + PWM duty; TTL lease watchdog)
+  │   ├── gpio.rs         (named pin abstraction; D2/D3/MCURST/SpeakerEn…)
+  │   └── ultrasonic.rs   (HC-SR04 TRIG/ECHO GPIO timing)
   └── reset.rs            (MCU reset via BCM5)
 ```
 
@@ -146,7 +148,21 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `get_battery_voltage` | — | `voltage_v`, `raw_adc` |
 | `set_servo_pulse_us` | `channel`, `pulse_us`, `ttl_ms` | `channel`, `pulse_us` |
 | `set_servo_angle` | `channel`, `angle_deg`, `ttl_ms` | `channel`, `angle_deg`, `pulse_us` |
+| `get_servo_status` | — | `active_leases: [{channel, ttl_remaining_ms, conn_id}]` |
 | `reset_mcu` | — | `reset_ms` |
+| `get_mcu_status` | — | `resets_since_start`, `last_reset_s_ago` |
+| `read_adc` | `channel` (0–7) | `channel`, `raw_value` |
+| `set_motor_speed` | `channel` (0–3), `speed_pct`, `ttl_ms` | `channel`, `speed_pct` |
+| `stop_all_motors` | — | `stopped` (count) |
+| `get_motor_status` | — | `active_leases: [{channel, ttl_remaining_ms, conn_id}]` |
+| `drive` | `speed_pct`, `ttl_ms` | `speed_pct`, `motors` |
+| `steer` | `angle_deg`, `ttl_ms` | `servo`, `channel`, `angle_deg`, `pulse_us` |
+| `pan_camera` | `angle_deg`, `ttl_ms` | `servo`, `channel`, `angle_deg`, `pulse_us` |
+| `tilt_camera` | `angle_deg`, `ttl_ms` | `servo`, `channel`, `angle_deg`, `pulse_us` |
+| `read_grayscale` | — | `channels: [u8; 3]`, `values: [u16; 3]` |
+| `read_ultrasonic` | — | `distance_cm` |
+| `enable_speaker` | — | `enabled: true`, `pin_bcm` |
+| `disable_speaker` | — | `enabled: false`, `pin_bcm` |
 
 ### Error Codes
 
