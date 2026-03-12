@@ -194,7 +194,7 @@ Priority order (highest wins):
 3. **Config file** (TOML)
 4. **Compiled defaults**
 
-See `config.toml.example` for all options.
+See `config.toml` for all options.
 
 ## Security
 

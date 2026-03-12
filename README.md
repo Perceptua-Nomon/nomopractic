@@ -46,7 +46,7 @@ cross build --target aarch64-unknown-linux-gnu --release
 # On the Pi:
 sudo cp target/aarch64-unknown-linux-gnu/release/nomopractic /usr/local/bin/
 sudo mkdir -p /etc/nomopractic
-sudo cp config.toml.example /etc/nomopractic/config.toml
+sudo cp config.toml /etc/nomopractic/config.toml
 sudo cp systemd/nomopractic.service /etc/systemd/system/
 sudo systemctl enable --now nomopractic
 ```

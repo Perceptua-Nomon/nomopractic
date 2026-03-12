@@ -284,7 +284,7 @@ fixed as the first step of this phase.
 - [x] TTL watchdog stops motors on lease expiry
 - [x] Client disconnect stops all held motor channels
 - [x] All tests pass without hardware
-- [x] `config.toml.example` documents motor wiring
+- [x] `config.toml` documents motor wiring
 
 ---
 
@@ -303,7 +303,7 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 - [x] `config.rs`: `SensorChannels { grayscale: [u8; 3] }` struct
   - Default: `[0, 1, 2]` (A0 = left, A1 = centre, A2 = right for PicarX)
   - Validation: each channel must be in 0–7 range
-- [x] Both structs added to `Config`; `config.toml.example` updated with
+- [x] Both structs added to `Config`; `config.toml` updated with
       `[servos]` and `[sensors]` sections
 
 ### 7.2 — Drive IPC Method
@@ -384,7 +384,7 @@ IPC methods backed by config-driven pin assignments.
 - [x] `config.rs`: `UltrasonicConfig { trig_pin_bcm: u8, echo_pin_bcm: u8, timeout_ms: u64 }`
   - Defaults: TRIG = BCM 27 (D2), ECHO = BCM 22 (D3), timeout = 20 ms
 - [x] `speaker_en_pin_bcm: u8` field added to `Config` (default: 20 = BCM 20)
-- [x] `config.toml.example` updated with `[ultrasonic]` section
+- [x] `config.toml` updated with `[ultrasonic]` section
 
 ### 8.4 — IPC Methods
 - [x] `read_ultrasonic {}` → `{ distance_cm: f64 }`
@@ -405,3 +405,22 @@ IPC methods backed by config-driven pin assignments.
 - [x] All 149 tests pass without hardware
 - [x] `cargo clippy -- -D warnings` clean
 - [x] `cargo fmt --check` clean
+
+---
+
+### v0.3.0 Release Prep
+
+**Goal**: Align config strategy with `nomothetic`, remove legacy files, and
+confirm checks pass before tagging.
+
+- [x] `config.toml.example` renamed to `config.toml` — defaults committed to
+      repo; no copy step required at install
+- [x] `docs/releases/` removed (GitHub auto-generates release notes from tags)
+- [x] Version bumped to `0.3.0` in `Cargo.toml`
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+- [x] All tests pass
+
+---
+
+## Upcoming

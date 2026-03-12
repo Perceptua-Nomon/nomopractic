@@ -165,7 +165,7 @@ Then verify the service is healthy as above.
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `checksum mismatch` | Partial download or wrong asset name | Re-run; confirm the GitHub Release job completed |
-| Service exits immediately | Config file missing or malformed | Check `/etc/nomopractic/config.toml`; copy from `config.toml.example` |
+| Service exits immediately | Config file missing or malformed | Check `/etc/nomopractic/config.toml`; copy from `config.toml` in the release archive |
 | Socket not created | Service started as wrong user | Confirm `nomopractic.service` `User=` matches the socket directory owner |
 | `HARDWARE_ERROR` on all IPC calls | I2C bus not enabled or wrong address | `sudo raspi-config` → enable I2C; verify `hat_address = 0x14` in config |
 | nomothetic returns 503 on `/api/hat/*` | `nomopractic.service` not running | `sudo systemctl start nomopractic` then retry |
