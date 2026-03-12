@@ -389,7 +389,7 @@ IPC methods backed by config-driven pin assignments.
 ### 8.4 — IPC Methods
 - [x] `read_ultrasonic {}` → `{ distance_cm: f64 }`
   - Calls `ultrasonic::read_distance_cm` with config-specified pins/timeout
-  - `HARDWARE_ERROR` on GPIO failure; `TIMEOUT` and `NO_ECHO` error codes
+  - `HARDWARE_ERROR` on GPIO failure; `TIMEOUT` on measurement timeout; `NO_ECHO` when object is out of sensor range (2–400 cm)
 - [x] `enable_speaker {}` → `{ enabled: true, pin_bcm: 20 }`
   - Writes BCM 20 (`SpeakerEn`) high via GPIO bus
 - [x] `disable_speaker {}` → `{ enabled: false, pin_bcm: 20 }`

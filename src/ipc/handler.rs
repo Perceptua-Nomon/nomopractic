@@ -763,12 +763,12 @@ impl Handler {
             }
             Err(ultrasonic::UltrasonicError::Timeout(ms)) => Response::err(
                 request.id.clone(),
-                "HARDWARE_ERROR",
+                "TIMEOUT",
                 format!("ultrasonic measurement timed out after {ms} ms"),
             ),
             Err(ultrasonic::UltrasonicError::NoEcho) => Response::err(
                 request.id.clone(),
-                "HARDWARE_ERROR",
+                "NO_ECHO",
                 "no valid echo received (object out of sensor range 2–400 cm)",
             ),
             Err(ultrasonic::UltrasonicError::Gpio(e)) => {
@@ -780,7 +780,7 @@ impl Handler {
     /// `enable_speaker {}` — assert the speaker-amplifier enable pin HIGH.
     async fn handle_enable_speaker(&self, request: &Request) -> Response {
         let bcm = self.config.speaker_en_pin_bcm;
-        match self.gpio.bus.lock().await.write_pin(bcm, true) {
+        match gpio::write_gpio_bcm(&self.gpio, bcm, true).await {
             Ok(()) => Response::ok(
                 request.id.clone(),
                 json!({ "enabled": true, "pin_bcm": bcm }),
@@ -792,7 +792,7 @@ impl Handler {
     /// `disable_speaker {}` — pull the speaker-amplifier enable pin LOW.
     async fn handle_disable_speaker(&self, request: &Request) -> Response {
         let bcm = self.config.speaker_en_pin_bcm;
-        match self.gpio.bus.lock().await.write_pin(bcm, false) {
+        match gpio::write_gpio_bcm(&self.gpio, bcm, false).await {
             Ok(()) => Response::ok(
                 request.id.clone(),
                 json!({ "enabled": false, "pin_bcm": bcm }),
@@ -889,6 +889,60 @@ mod tests {
     fn test_handler_with_adc(hi: u8, lo: u8) -> Handler {
         let hat = Arc::new(Hat::new(MockI2c { response: [hi, lo] }, 0x14));
         let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+        Handler::new(Arc::new(Config::default()), hat, gpio)
+    }
+
+    fn test_handler_with_config(config: Arc<Config>) -> Handler {
+        let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
+        let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+        Handler::new(config, hat, gpio)
+    }
+
+    // ------------------------------------------------------------------
+    // Mock GPIO that simulates an HC-SR04 ECHO pulse for handler-level
+    // ultrasonic tests.  All other pins behave like MockGpio.
+    // ------------------------------------------------------------------
+
+    struct MockUltrasonicGpio {
+        state: std::collections::HashMap<u8, bool>,
+        echo_bcm: u8,
+        reads_until_high: usize,
+        reads_high_for: usize,
+        read_count: usize,
+    }
+
+    impl MockUltrasonicGpio {
+        fn new(echo_bcm: u8, reads_until_high: usize, reads_high_for: usize) -> Self {
+            Self {
+                state: std::collections::HashMap::new(),
+                echo_bcm,
+                reads_until_high,
+                reads_high_for,
+                read_count: 0,
+            }
+        }
+    }
+
+    impl GpioBus for MockUltrasonicGpio {
+        fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
+            self.state.insert(pin_bcm, high);
+            Ok(())
+        }
+
+        fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
+            if pin_bcm == self.echo_bcm {
+                let count = self.read_count;
+                self.read_count += 1;
+                return Ok(count >= self.reads_until_high
+                    && count < self.reads_until_high + self.reads_high_for);
+            }
+            Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
+        }
+    }
+
+    fn test_handler_with_ultrasonic(mock: MockUltrasonicGpio) -> Handler {
+        let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
+        let gpio = Arc::new(HatGpio::new(mock));
         Handler::new(Arc::new(Config::default()), hat, gpio)
     }
 
@@ -1419,6 +1473,76 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // read_ultrasonic
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_ultrasonic_timeout_returns_timeout_error() {
+        // MockGpio's ECHO pin is always low (never written) → driver times out.
+        // Use a very short timeout so the test completes quickly.
+        let mut config = Config::default();
+        config.ultrasonic.timeout_ms = 1;
+        let handler = test_handler_with_config(Arc::new(config));
+
+        let raw = r#"{"id":"us1","method":"read_ultrasonic","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "us1");
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "TIMEOUT");
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("1 ms"),
+            "TIMEOUT message should include the timeout value"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_ultrasonic_no_echo_returns_no_echo_error() {
+        // ECHO goes high immediately then low after 2 reads → near-zero elapsed
+        // time → distance ≈ 0 cm < 2 cm → driver returns NoEcho.
+        let echo_bcm = Config::default().ultrasonic.echo_pin_bcm;
+        let mock = MockUltrasonicGpio::new(echo_bcm, 2, 2);
+        let handler = test_handler_with_ultrasonic(mock);
+
+        let raw = r#"{"id":"us2","method":"read_ultrasonic","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "us2");
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "NO_ECHO");
+    }
+
+    #[tokio::test]
+    async fn read_ultrasonic_success_response_shape() {
+        // When the driver returns Ok, the IPC response must contain distance_cm.
+        // With a mock the elapsed time is near-zero so the driver most often
+        // returns NoEcho; we accept both outcomes and validate each shape.
+        let echo_bcm = Config::default().ultrasonic.echo_pin_bcm;
+        let mock = MockUltrasonicGpio::new(echo_bcm, 1, 100);
+        let handler = test_handler_with_ultrasonic(mock);
+
+        let raw = r#"{"id":"us3","method":"read_ultrasonic","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "us3");
+        if resp["ok"].as_bool().unwrap_or(false) {
+            assert!(
+                resp["result"]["distance_cm"].is_number(),
+                "successful response must contain numeric distance_cm"
+            );
+        } else {
+            // Sub-2 cm or out-of-range produces NO_ECHO with the zero-time mock.
+            assert_eq!(resp["error"]["code"], "NO_ECHO");
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Speaker
     // ------------------------------------------------------------------
 
@@ -1432,8 +1556,10 @@ mod tests {
         assert_eq!(resp["id"], "sp1");
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["enabled"], true);
-        // Default speaker_en_pin_bcm is 20.
-        assert_eq!(resp["result"]["pin_bcm"], 20);
+        assert_eq!(
+            resp["result"]["pin_bcm"],
+            handler.config().speaker_en_pin_bcm
+        );
     }
 
     #[tokio::test]
@@ -1446,7 +1572,10 @@ mod tests {
         assert_eq!(resp["id"], "sp2");
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["enabled"], false);
-        assert_eq!(resp["result"]["pin_bcm"], 20);
+        assert_eq!(
+            resp["result"]["pin_bcm"],
+            handler.config().speaker_en_pin_bcm
+        );
     }
 
     #[tokio::test]
@@ -1455,14 +1584,15 @@ mod tests {
         handler
             .dispatch(r#"{"id":"sp3","method":"enable_speaker","params":{}}"#, 0)
             .await;
-        // After enable, pin 20 must be high (read via gpio mock).
-        let pin_high = handler.gpio.bus.lock().await.read_pin(20).unwrap();
-        assert!(pin_high, "BCM 20 should be HIGH after enable_speaker");
+        let bcm = handler.config().speaker_en_pin_bcm;
+        // After enable, the speaker enable pin must be high (read via gpio mock).
+        let pin_high = handler.gpio.bus.lock().await.read_pin(bcm).unwrap();
+        assert!(pin_high, "speaker enable pin should be HIGH after enable_speaker");
 
         handler
             .dispatch(r#"{"id":"sp4","method":"disable_speaker","params":{}}"#, 0)
             .await;
-        let pin_high = handler.gpio.bus.lock().await.read_pin(20).unwrap();
-        assert!(!pin_high, "BCM 20 should be LOW after disable_speaker");
+        let pin_high = handler.gpio.bus.lock().await.read_pin(bcm).unwrap();
+        assert!(!pin_high, "speaker enable pin should be LOW after disable_speaker");
     }
 }

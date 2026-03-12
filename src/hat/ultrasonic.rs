@@ -63,50 +63,52 @@ pub async fn read_distance_cm(
     }
     sleep(Duration::from_millis(1)).await;
 
-    // 2. Send 10 µs trigger pulse.
-    {
+    // 2–4. Send trigger pulse and measure echo pulse duration.
+    //
+    // The GPIO lock is held for the entire timing-critical section to
+    // eliminate per-read lock churn and keep the echo measurement precise.
+    // A single end-to-end deadline covers both the pulse-start wait and
+    // the pulse-end wait, so the total wall time is bounded by one
+    // timeout_ms window (not 2×).
+    let (pulse_start, pulse_end_time) = {
         let mut bus = gpio.bus.lock().await;
+
+        // 2. Assert TRIG high for ≥ 10 µs then low.
+        //    tokio::time resolution is ~1 ms, so spin to honour the minimum
+        //    pulse width without blocking the async executor for a full timer tick.
         bus.write_pin(trig_bcm, true)?;
-    }
-    // 10 µs — tokio::time resolution is ~1 ms, but sleep(0) yields;
-    // we spin briefly instead to honour the minimum pulse width.
-    let pulse_end = Instant::now() + Duration::from_micros(10);
-    while Instant::now() < pulse_end {
-        std::hint::spin_loop();
-    }
-    {
-        let mut bus = gpio.bus.lock().await;
+        let trig_end = Instant::now() + Duration::from_micros(10);
+        while Instant::now() < trig_end {
+            std::hint::spin_loop();
+        }
         bus.write_pin(trig_bcm, false)?;
-    }
 
-    // 3. Wait for ECHO to go high (start of return pulse).
-    let start_deadline = Instant::now() + timeout;
-    let pulse_start = loop {
-        let high = {
-            let mut bus = gpio.bus.lock().await;
-            bus.read_pin(echo_bcm)?
-        };
-        if high {
-            break Instant::now();
-        }
-        if Instant::now() >= start_deadline {
-            return Err(UltrasonicError::Timeout(timeout_ms));
-        }
-    };
+        // Shared end-to-end deadline for both echo phases.
+        let deadline = Instant::now() + timeout;
 
-    // 4. Wait for ECHO to go low (end of return pulse).
-    let end_deadline = Instant::now() + timeout;
-    let pulse_end_time = loop {
-        let high = {
-            let mut bus = gpio.bus.lock().await;
-            bus.read_pin(echo_bcm)?
+        // 3. Wait for ECHO to go high (start of return pulse).
+        let pulse_start = loop {
+            if bus.read_pin(echo_bcm)? {
+                break Instant::now();
+            }
+            if Instant::now() >= deadline {
+                return Err(UltrasonicError::Timeout(timeout_ms));
+            }
+            std::hint::spin_loop();
         };
-        if !high {
-            break Instant::now();
-        }
-        if Instant::now() >= end_deadline {
-            return Err(UltrasonicError::Timeout(timeout_ms));
-        }
+
+        // 4. Wait for ECHO to go low (end of return pulse).
+        let pulse_end_time = loop {
+            if !bus.read_pin(echo_bcm)? {
+                break Instant::now();
+            }
+            if Instant::now() >= deadline {
+                return Err(UltrasonicError::Timeout(timeout_ms));
+            }
+            std::hint::spin_loop();
+        };
+
+        (pulse_start, pulse_end_time)
     };
 
     // 5. Calculate distance.
