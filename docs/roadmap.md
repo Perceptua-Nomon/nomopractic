@@ -424,3 +424,27 @@ confirm checks pass before tagging.
 ---
 
 ## Upcoming
+
+### Phase 9 — Audio Levels Control (P1)
+
+**Goal**: Expose software control for both output volume (HifiBerry DAC) and
+input gain (USB microphone PCM2902) via new IPC methods, allowing the nomothetic
+API to manage audio input and output levels without restarting the daemon.
+
+**Candidate deliverables:**
+
+**Output Volume (HifiBerry DAC — ALSA card 1):**
+- [ ] Investigate ALSA mixer control for the HifiBerry DAC (likely `"Digital"` or `"PCM"` control)
+- [ ] `set_volume { volume_pct: u8 }` IPC method (0–100 maps to ALSA dB range)
+- [ ] `get_volume {}` IPC method returning `{ volume_pct: u8 }`
+- [ ] Config: default output volume level in `[audio]` section of `config.toml`
+
+**Input Gain (USB Microphone PCM2902 — ALSA card 2):**
+- [ ] Investigate ALSA mixer controls for PCM2902 capture (likely `"Mic"`, `"Mic Capture"`, or `"Capture"` control)
+- [ ] `set_mic_gain { gain_pct: u8 }` IPC method (0–100 maps to both mic gain and AGC dB range)
+- [ ] `get_mic_gain {}` IPC method returning `{ gain_pct: u8 }`
+- [ ] Config: default microphone input gain in `[audio]` section of `config.toml`
+
+**Testing & Integration:**
+- [ ] Unit tests for all four IPC methods (mocked ALSA)
+- [ ] Phase 9 exit: both output volume and input gain settable via IPC; daemon does not need a restart
