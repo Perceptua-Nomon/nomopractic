@@ -227,29 +227,38 @@ mod tests {
 
     #[test]
     fn pin_bcm_mappings() {
+        assert_eq!(GpioPin::D2.bcm(), 27);
+        assert_eq!(GpioPin::D3.bcm(), 22);
         assert_eq!(GpioPin::D4.bcm(), 23);
         assert_eq!(GpioPin::D5.bcm(), 24);
         assert_eq!(GpioPin::McuRst.bcm(), 5);
         assert_eq!(GpioPin::Sw.bcm(), 19);
         assert_eq!(GpioPin::Led.bcm(), 26);
+        assert_eq!(GpioPin::SpeakerEn.bcm(), 20);
     }
 
     #[test]
     fn pin_direction() {
+        assert!(GpioPin::D2.is_output());
+        assert!(!GpioPin::D3.is_output()); // ECHO input
         assert!(GpioPin::D4.is_output());
         assert!(GpioPin::D5.is_output());
         assert!(GpioPin::McuRst.is_output());
         assert!(!GpioPin::Sw.is_output());
         assert!(GpioPin::Led.is_output());
+        assert!(GpioPin::SpeakerEn.is_output());
     }
 
     #[test]
     fn pin_from_name_round_trip() {
+        assert_eq!(GpioPin::from_name("D2"), Some(GpioPin::D2));
+        assert_eq!(GpioPin::from_name("D3"), Some(GpioPin::D3));
         assert_eq!(GpioPin::from_name("D4"), Some(GpioPin::D4));
         assert_eq!(GpioPin::from_name("D5"), Some(GpioPin::D5));
         assert_eq!(GpioPin::from_name("MCURST"), Some(GpioPin::McuRst));
         assert_eq!(GpioPin::from_name("SW"), Some(GpioPin::Sw));
         assert_eq!(GpioPin::from_name("LED"), Some(GpioPin::Led));
+        assert_eq!(GpioPin::from_name("SPEAKER_EN"), Some(GpioPin::SpeakerEn));
         assert_eq!(GpioPin::from_name("INVALID"), None);
     }
 
