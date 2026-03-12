@@ -1,12 +1,15 @@
 // Named GPIO pins for Robot HAT V4.
 //
-// | HAT Name | BCM | Direction |
-// |----------|-----|-----------|
-// | D4       |  23 | Output    |
-// | D5       |  24 | Output    |
-// | MCURST   |   5 | Output    |
-// | SW       |  19 | Input     |
-// | LED      |  26 | Output    |
+// | HAT Name   | BCM | Direction | Usage                         |
+// |------------|-----|-----------|-------------------------------|
+// | D2         |  27 | Output    | Ultrasonic TRIG               |
+// | D3         |  22 | Input     | Ultrasonic ECHO               |
+// | D4         |  23 | Output    | Motor 1 direction             |
+// | D5         |  24 | Output    | Motor 0 direction             |
+// | MCURST     |   5 | Output    | MCU reset pulse               |
+// | SW         |  19 | Input     | User push-button              |
+// | LED        |  26 | Output    | Status LED                    |
+// | SPEAKER_EN |  20 | Output    | Speaker amplifier enable      |
 
 use std::collections::HashMap;
 
@@ -25,49 +28,62 @@ pub enum GpioError {
 /// Named GPIO pins on the Robot HAT V4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpioPin {
+    D2,
+    D3,
     D4,
     D5,
     McuRst,
     Sw,
     Led,
+    SpeakerEn,
 }
 
 impl GpioPin {
     /// BCM GPIO pin number.
     pub fn bcm(self) -> u8 {
         match self {
+            Self::D2 => 27,
+            Self::D3 => 22,
             Self::D4 => 23,
             Self::D5 => 24,
             Self::McuRst => 5,
             Self::Sw => 19,
             Self::Led => 26,
+            Self::SpeakerEn => 20,
         }
     }
 
     /// HAT label for this pin.
     pub fn name(self) -> &'static str {
         match self {
+            Self::D2 => "D2",
+            Self::D3 => "D3",
             Self::D4 => "D4",
             Self::D5 => "D5",
             Self::McuRst => "MCURST",
             Self::Sw => "SW",
             Self::Led => "LED",
+            Self::SpeakerEn => "SPEAKER_EN",
         }
     }
 
     /// Returns `true` if this pin is an output (can be driven high/low).
     pub fn is_output(self) -> bool {
-        !matches!(self, Self::Sw)
+        // D3 (ultrasonic ECHO) and SW (user button) are input-only.
+        !matches!(self, Self::D3 | Self::Sw)
     }
 
     /// Look up a pin by its HAT label (case-sensitive).
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "D2" => Some(Self::D2),
+            "D3" => Some(Self::D3),
             "D4" => Some(Self::D4),
             "D5" => Some(Self::D5),
             "MCURST" => Some(Self::McuRst),
             "SW" => Some(Self::Sw),
             "LED" => Some(Self::Led),
+            "SPEAKER_EN" => Some(Self::SpeakerEn),
             _ => None,
         }
     }
@@ -211,29 +227,38 @@ mod tests {
 
     #[test]
     fn pin_bcm_mappings() {
+        assert_eq!(GpioPin::D2.bcm(), 27);
+        assert_eq!(GpioPin::D3.bcm(), 22);
         assert_eq!(GpioPin::D4.bcm(), 23);
         assert_eq!(GpioPin::D5.bcm(), 24);
         assert_eq!(GpioPin::McuRst.bcm(), 5);
         assert_eq!(GpioPin::Sw.bcm(), 19);
         assert_eq!(GpioPin::Led.bcm(), 26);
+        assert_eq!(GpioPin::SpeakerEn.bcm(), 20);
     }
 
     #[test]
     fn pin_direction() {
+        assert!(GpioPin::D2.is_output());
+        assert!(!GpioPin::D3.is_output()); // ECHO input
         assert!(GpioPin::D4.is_output());
         assert!(GpioPin::D5.is_output());
         assert!(GpioPin::McuRst.is_output());
         assert!(!GpioPin::Sw.is_output());
         assert!(GpioPin::Led.is_output());
+        assert!(GpioPin::SpeakerEn.is_output());
     }
 
     #[test]
     fn pin_from_name_round_trip() {
+        assert_eq!(GpioPin::from_name("D2"), Some(GpioPin::D2));
+        assert_eq!(GpioPin::from_name("D3"), Some(GpioPin::D3));
         assert_eq!(GpioPin::from_name("D4"), Some(GpioPin::D4));
         assert_eq!(GpioPin::from_name("D5"), Some(GpioPin::D5));
         assert_eq!(GpioPin::from_name("MCURST"), Some(GpioPin::McuRst));
         assert_eq!(GpioPin::from_name("SW"), Some(GpioPin::Sw));
         assert_eq!(GpioPin::from_name("LED"), Some(GpioPin::Led));
+        assert_eq!(GpioPin::from_name("SPEAKER_EN"), Some(GpioPin::SpeakerEn));
         assert_eq!(GpioPin::from_name("INVALID"), None);
     }
 

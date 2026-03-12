@@ -7,3 +7,4 @@ pub mod i2c;
 pub mod motor;
 pub mod pwm;
 pub mod servo;
+pub mod ultrasonic;

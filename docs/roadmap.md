@@ -284,7 +284,7 @@ fixed as the first step of this phase.
 - [x] TTL watchdog stops motors on lease expiry
 - [x] Client disconnect stops all held motor channels
 - [x] All tests pass without hardware
-- [x] `config.toml.example` documents motor wiring
+- [x] `config.toml` documents motor wiring
 
 ---
 
@@ -303,7 +303,7 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 - [x] `config.rs`: `SensorChannels { grayscale: [u8; 3] }` struct
   - Default: `[0, 1, 2]` (A0 = left, A1 = centre, A2 = right for PicarX)
   - Validation: each channel must be in 0–7 range
-- [x] Both structs added to `Config`; `config.toml.example` updated with
+- [x] Both structs added to `Config`; `config.toml` updated with
       `[servos]` and `[sensors]` sections
 
 ### 7.2 — Drive IPC Method
@@ -355,3 +355,96 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 5 | Hardening & Deployment | ✅ Complete | 89 |
 | 6 | DC Motor Control | ✅ Complete | 112 |
 | 7 | Vehicle Convenience Methods | ✅ Complete | 138 |
+| 8 | Peripheral Expansion | ✅ Complete | 149 |
+
+---
+
+## Phase 8 — Peripheral Expansion (P1)
+
+**Goal**: Add support for the Robot HAT V4 ultrasonic distance sensor and
+speaker amplifier enable pin. Expands the GPIO pin table and adds three new
+IPC methods backed by config-driven pin assignments.
+
+### 8.1 — GPIO Pin Expansion
+- [x] `hat/gpio.rs`: Added `D2` (BCM 27), `D3` (BCM 22), `SpeakerEn` (BCM 20)
+  to `GpioPin` enum
+- [x] `bcm()`, `name()`, `from_name()` match arms updated for new variants
+- [x] `is_output()` updated: `D3` (ECHO, input) excluded alongside `Sw`
+
+### 8.2 — Ultrasonic Sensor (`hat/ultrasonic.rs`)
+- [x] New module `hat/ultrasonic.rs`
+- [x] `read_distance_cm(gpio, trig_bcm, echo_bcm, timeout_ms) -> Result<f64, UltrasonicError>`:
+  - Quiesce TRIG (low, sleep 1 ms) → pulse TRIG high for 10 µs → wait ECHO
+    high → time ECHO pulse → compute `elapsed_s × 34330 / 2`
+  - Valid range: 2–400 cm (HC-SR04 spec); out-of-range returns `NoEcho`
+- [x] `UltrasonicError { Gpio(GpioError), Timeout(u64), NoEcho }`
+- [x] 3 unit tests
+
+### 8.3 — UltrasonicConfig
+- [x] `config.rs`: `UltrasonicConfig { trig_pin_bcm: u8, echo_pin_bcm: u8, timeout_ms: u64 }`
+  - Defaults: TRIG = BCM 27 (D2), ECHO = BCM 22 (D3), timeout = 20 ms
+- [x] `speaker_en_pin_bcm: u8` field added to `Config` (default: 20 = BCM 20)
+- [x] `config.toml` updated with `[ultrasonic]` section
+
+### 8.4 — IPC Methods
+- [x] `read_ultrasonic {}` → `{ distance_cm: f64 }`
+  - Calls `ultrasonic::read_distance_cm` with config-specified pins/timeout
+  - `HARDWARE_ERROR` on GPIO failure; `TIMEOUT` on measurement timeout; `NO_ECHO` when object is out of sensor range (2–400 cm)
+- [x] `enable_speaker {}` → `{ enabled: true, pin_bcm: 20 }`
+  - Writes BCM 20 (`SpeakerEn`) high via GPIO bus
+- [x] `disable_speaker {}` → `{ enabled: false, pin_bcm: 20 }`
+  - Writes BCM 20 low
+
+### 8.5 — Tests
+- [x] `ipc/handler.rs`: 3 unit tests — `enable_speaker_returns_enabled_true`,
+      `disable_speaker_returns_enabled_false`, `enable_then_disable_speaker_toggles_pin`
+
+### Phase 8 Exit Criteria
+- [x] All 3 new IPC methods dispatched correctly
+- [x] GPIO pin table complete for PicarX sensors & speaker
+- [x] All 149 tests pass without hardware
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+
+---
+
+### v0.3.0 Release Prep
+
+**Goal**: Align config strategy with `nomothetic`, remove legacy files, and
+confirm checks pass before tagging.
+
+- [x] `config.toml.example` renamed to `config.toml` — defaults committed to
+      repo; no copy step required at install
+- [x] `docs/releases/` removed (GitHub auto-generates release notes from tags)
+- [x] Version bumped to `0.3.0` in `Cargo.toml`
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+- [x] All tests pass
+
+---
+
+## Upcoming
+
+### Phase 9 — Audio Levels Control (P1)
+
+**Goal**: Expose software control for both output volume (HifiBerry DAC) and
+input gain (USB microphone PCM2902) via new IPC methods, allowing the nomothetic
+API to manage audio input and output levels without restarting the daemon.
+
+**Candidate deliverables:**
+
+**Output Volume (HifiBerry DAC — ALSA card 1):**
+- [ ] Investigate ALSA mixer control for the HifiBerry DAC (likely `"Digital"` or `"PCM"` control)
+- [ ] `set_volume { volume_pct: u8 }` IPC method (0–100 maps to ALSA dB range)
+- [ ] `get_volume {}` IPC method returning `{ volume_pct: u8 }`
+- [ ] Config: default output volume level in `[audio]` section of `config.toml`
+
+**Input Gain (USB Microphone PCM2902 — ALSA card 2):**
+- [ ] Investigate ALSA mixer controls for PCM2902 capture (likely `"Mic"`, `"Mic Capture"`, or `"Capture"` control)
+- [ ] `set_mic_gain { gain_pct: u8 }` IPC method (0–100 maps to both mic gain and AGC dB range)
+- [ ] `get_mic_gain {}` IPC method returning `{ gain_pct: u8 }`
+- [ ] Config: default microphone input gain in `[audio]` section of `config.toml`
+
+**Testing & Integration:**
+- [ ] Unit tests for all four IPC methods (mocked ALSA)
+- [ ] Phase 9 exit: both output volume and input gain settable via IPC; daemon does not need a restart
