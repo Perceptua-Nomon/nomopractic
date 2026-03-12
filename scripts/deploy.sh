@@ -2,10 +2,11 @@
 # deploy.sh — Download, verify, atomically install, and restart nomopractic.
 #
 # Usage:
-#   ./scripts/deploy.sh <version> [<pi-host>]
+#   ./scripts/deploy.sh [<version>] [<pi-host>]
 #
 # Arguments:
-#   version   Git tag to deploy, e.g. "v0.2.0"
+#   version   Git tag to deploy, e.g. "v0.2.0". If omitted, the script fetches
+#             and deploys the latest release from GitHub.
 #   pi-host   SSH host (user@host or plain hostname). Defaults to
 #             NOMON_PI_HOST env var. If empty, runs locally on the Pi.
 #
@@ -15,7 +16,10 @@
 #   NOMON_GITHUB_REPO   GitHub "owner/repo" slug. Default: Perceptua-Nomon/nomopractic
 #
 # Examples:
-#   # Deploy from a dev machine to a Pi over SSH:
+#   # Deploy latest release from a dev machine to a Pi over SSH:
+#   ./scripts/deploy.sh pi@raspberrypi.local
+#
+#   # Deploy a specific version from a dev machine to a Pi over SSH:
 #   ./scripts/deploy.sh v0.2.0 pi@raspberrypi.local
 #
 #   # Deploy directly on the Pi (scp the script first):
@@ -54,18 +58,25 @@ trap cleanup EXIT
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <version> [<pi-host>]" >&2
+VERSION="${1:-}"
+PI_HOST="${2:-${NOMON_PI_HOST:-}}"
+
+if [[ -n "${VERSION}" && ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: version must start with 'v' followed by semver (e.g. v0.2.0)" >&2
     exit 1
 fi
 
-VERSION="$1"
-PI_HOST="${2:-${NOMON_PI_HOST:-}}"
+# ── Resolve version ───────────────────────────────────────────────────────────
 
-# Validate version format.
-if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Error: version must start with 'v' followed by semver (e.g. v0.2.0)" >&2
-    exit 1
+if [[ -z "${VERSION}" ]]; then
+    echo "==> Resolving latest release from GitHub..."
+    VERSION="$(curl -sf "https://api.github.com/repos/${REPO}/releases/latest" \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])')"
+    if [[ -z "${VERSION}" ]]; then
+        echo "Error: could not determine latest release from GitHub." >&2
+        exit 1
+    fi
+    echo "  Latest release: ${VERSION}"
 fi
 
 # ── SSH helper ───────────────────────────────────────────────────────────────
