@@ -13,10 +13,14 @@ pub enum HatError {
     InvalidChannel(u8),
     #[error("invalid servo channel {0}: must be 0–11")]
     InvalidServoChannel(u8),
+    #[error("invalid motor channel {0}: must be 12–15")]
+    InvalidMotorChannel(u8),
     #[error("invalid pulse width {0} µs: must be 500–2500")]
     InvalidPulse(u16),
     #[error("invalid angle {0}°: must be 0.0–180.0")]
     InvalidAngle(f64),
+    #[error("invalid parameter: {0}")]
+    InvalidParam(String),
 }
 
 /// Abstraction over raw I2C bus operations, enabling mock injection in tests.

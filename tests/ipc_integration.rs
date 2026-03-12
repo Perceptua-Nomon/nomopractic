@@ -476,6 +476,185 @@ async fn message_at_max_size_boundary_is_accepted() {
     let _ = handle.await;
 }
 
+// ---------------------------------------------------------------------------
+// Motor IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn set_motor_speed_forward_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m1","method":"set_motor_speed","params":{"channel":0,"speed_pct":50.0,"ttl_ms":5000}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["channel"], 0);
+    assert_eq!(resp["result"]["speed_pct"], 50.0_f64);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_motor_speed_reverse_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m2","method":"set_motor_speed","params":{"channel":1,"speed_pct":-75.0,"ttl_ms":5000}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m2");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["channel"], 1);
+    assert_eq!(resp["result"]["speed_pct"], -75.0_f64);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_motor_speed_invalid_channel_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m3","method":"set_motor_speed","params":{"channel":9,"speed_pct":50.0}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m3");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_motor_speed_out_of_range_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m4","method":"set_motor_speed","params":{"channel":0,"speed_pct":200.0}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m4");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn stop_all_motors_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Put a motor in motion first.
+    let pre = request(
+        &mut reader,
+        r#"{"id":"pre","method":"set_motor_speed","params":{"channel":0,"speed_pct":60.0,"ttl_ms":5000}}"#,
+    )
+    .await;
+    assert_eq!(pre["ok"], true);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m5","method":"stop_all_motors","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m5");
+    assert_eq!(resp["ok"], true);
+    // Default config has 2 motors.
+    assert_eq!(resp["result"]["stopped"], 2);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_motor_status_empty_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m6","method":"get_motor_status","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m6");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["active_leases"].as_array().unwrap().len(), 0);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_motor_status_shows_active_lease_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Set motor with a long TTL so the lease is still active when we query.
+    let pre = request(
+        &mut reader,
+        r#"{"id":"pre","method":"set_motor_speed","params":{"channel":0,"speed_pct":50.0,"ttl_ms":5000}}"#,
+    )
+    .await;
+    assert_eq!(pre["ok"], true);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"m7","method":"get_motor_status","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "m7");
+    assert_eq!(resp["ok"], true);
+    let leases = resp["result"]["active_leases"].as_array().unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0]["channel"], 0);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
 /// MAX_MESSAGE_LEN boundary: a message whose content is exactly 4097 bytes
 /// (one byte over the limit, excluding the framing newline) must be rejected
 /// without closing the connection.

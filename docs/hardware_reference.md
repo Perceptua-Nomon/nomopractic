@@ -83,3 +83,48 @@ prescaler = CLOCK_HZ / (SERVO_FREQ × PERIOD) - 1
 | Address | Device | Notes |
 |---------|--------|-------|
 | `0x36` | OV5647 camera | Buses 10/11 (muxed) — do not access |
+
+## DC Motor Channels
+
+Motors are driven via the TC1508S dual H-bridge on the Robot HAT V4.
+
+### Mode 1 (TC1508S) Protocol
+
+| Action | PWM duty | Direction pin |
+|--------|----------|---------------|
+| Forward | `speed_pct`% | HIGH |
+| Backward | `speed_pct`% | LOW |
+| Stop | 0% | any |
+
+Speed is expressed as a signed percentage: `−100.0` (full reverse) to `+100.0`
+(full forward). `0.0` is stop (zero duty).
+
+### Motor PWM Timer
+
+| Parameter | Value |
+|-----------|-------|
+| Timer group | 3 (channels 12–15) |
+| Prescaler register | `REG_PSC + 3 = 0x43` |
+| Auto-reload register | `REG_ARR + 3 = 0x47` |
+| Frequency | 100 Hz (`MOTOR_FREQ`) |
+
+Duty register: `REG_CHN + channel` (same formula as servo channels).
+
+### PicarX Default Wiring
+
+| IPC motor index | PWM channel | Direction pin | BCM |
+|----------------|-------------|---------------|-----|
+| 0 | P12 (channel 12) | D5 | 24 |
+| 1 | P13 (channel 13) | D4 | 23 |
+
+### PWM Channel Register Note
+
+Channel register address is `REG_CHN + channel` (stride 1 per channel,
+per the SunFounder robot-hat reference implementation). This means:
+
+| Channel | Register |
+|---------|----------|
+| Servo 0 | `0x20` |
+| Servo 11 | `0x2B` |
+| Motor 12 | `0x2C` |
+| Motor 15 | `0x2F` |

@@ -12,6 +12,7 @@ use crate::hat::adc;
 use crate::hat::battery;
 use crate::hat::gpio::{self, GpioError, HatGpio};
 use crate::hat::i2c::{Hat, HatError};
+use crate::hat::motor::{self, MotorError};
 use crate::hat::servo::LeaseManager;
 use crate::hat::{pwm, servo};
 use crate::reset;
@@ -31,8 +32,18 @@ fn hat_error_code(e: &HatError) -> &'static str {
         HatError::I2c(_) => "HARDWARE_ERROR",
         HatError::InvalidChannel(_)
         | HatError::InvalidServoChannel(_)
+        | HatError::InvalidMotorChannel(_)
         | HatError::InvalidPulse(_)
-        | HatError::InvalidAngle(_) => "INVALID_PARAMS",
+        | HatError::InvalidAngle(_)
+        | HatError::InvalidParam(_) => "INVALID_PARAMS",
+    }
+}
+
+/// Classify a `MotorError` into an IPC error code string.
+fn motor_error_code(e: &MotorError) -> &'static str {
+    match e {
+        MotorError::Hat(he) => hat_error_code(he),
+        MotorError::Gpio(ge) => gpio_error_code(ge),
     }
 }
 
@@ -50,6 +61,7 @@ pub struct Handler {
     start_time: Instant,
     hat: Arc<Hat>,
     lease_manager: Arc<LeaseManager>,
+    motor_lease_manager: Arc<LeaseManager>,
     gpio: Arc<HatGpio>,
     mcu_state: tokio::sync::Mutex<McuState>,
 }
@@ -61,6 +73,7 @@ impl Handler {
             start_time: Instant::now(),
             hat,
             lease_manager: Arc::new(LeaseManager::new()),
+            motor_lease_manager: Arc::new(LeaseManager::new()),
             gpio,
             mcu_state: tokio::sync::Mutex::new(McuState {
                 reset_count: 0,
@@ -73,20 +86,43 @@ impl Handler {
         &self.lease_manager
     }
 
+    pub fn motor_lease_manager(&self) -> &Arc<LeaseManager> {
+        &self.motor_lease_manager
+    }
+
     pub fn hat(&self) -> &Arc<Hat> {
         &self.hat
     }
 
-    /// Release all servo leases for a disconnected connection and idle any active channels.
+    pub fn config(&self) -> &Arc<Config> {
+        &self.config
+    }
+
+    /// Release all servo and motor leases for a disconnected connection and idle
+    /// any active channels.
     pub async fn on_client_disconnect(&self, conn_id: u64) {
-        let channels = self.lease_manager.release_connection(conn_id).await;
-        for ch in channels {
+        // Idle servo channels.
+        let servo_channels = self.lease_manager.release_connection(conn_id).await;
+        for ch in servo_channels {
             warn!(
                 channel = ch,
                 conn_id, "client disconnected; idling leased servo channel"
             );
             if let Err(e) = pwm::set_channel_pulse_us(&self.hat, ch, 0).await {
-                error!(error = %e, channel = ch, "failed to idle channel on client disconnect");
+                error!(error = %e, channel = ch, "failed to idle servo channel on client disconnect");
+            }
+        }
+        // Idle motor channels.
+        let motor_channels = self.motor_lease_manager.release_connection(conn_id).await;
+        for ipc_ch in motor_channels {
+            warn!(
+                channel = ipc_ch,
+                conn_id, "client disconnected; stopping leased motor"
+            );
+            if let Some(cfg) = self.config.motors.get(ipc_ch as usize)
+                && let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await
+            {
+                error!(error = %e, channel = ipc_ch, "failed to stop motor on client disconnect");
             }
         }
     }
@@ -120,8 +156,17 @@ impl Handler {
             "read_gpio" => self.handle_read_gpio(&request).await,
             "write_gpio" => self.handle_write_gpio(&request).await,
             "reset_mcu" => self.handle_reset_mcu(&request).await,
+            "set_motor_speed" => self.handle_set_motor_speed(&request, conn_id).await,
+            "stop_all_motors" => self.handle_stop_all_motors(&request).await,
+            "get_motor_status" => self.handle_get_motor_status(&request).await,
             "get_servo_status" => self.handle_get_servo_status(&request).await,
             "get_mcu_status" => self.handle_get_mcu_status(&request).await,
+            // Convenience / coordinated methods.
+            "drive" => self.handle_drive(&request, conn_id).await,
+            "steer" => self.handle_steer(&request, conn_id).await,
+            "pan_camera" => self.handle_pan_camera(&request, conn_id).await,
+            "tilt_camera" => self.handle_tilt_camera(&request, conn_id).await,
+            "read_grayscale" => self.handle_read_grayscale(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -385,6 +430,314 @@ impl Handler {
             json!({
                 "resets_since_start": resets,
                 "last_reset_s_ago": last_reset_s_ago,
+            }),
+        )
+    }
+
+    async fn handle_set_motor_speed(&self, request: &Request, conn_id: u64) -> Response {
+        let num_motors = self.config.motors.len();
+        let ipc_channel = match request.params.get("channel").and_then(|v| v.as_u64()) {
+            Some(ch) if (ch as usize) < num_motors => ch as u8,
+            Some(ch) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("channel {ch} is not configured; {num_motors} motor(s) available"),
+                );
+            }
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "channel is required");
+            }
+        };
+        let speed_pct = match request.params.get("speed_pct").and_then(|v| v.as_f64()) {
+            Some(s) if (-100.0..=100.0).contains(&s) => s,
+            Some(s) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("speed_pct {s} is out of range -100.0..=100.0"),
+                );
+            }
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "speed_pct is required",
+                );
+            }
+        };
+        let ttl_ms = match extract_ttl(request, self.config.motor_default_ttl_ms) {
+            Ok(ms) => ms,
+            Err(resp) => return resp,
+        };
+
+        let cfg = &self.config.motors[ipc_channel as usize];
+        match motor::set_motor_speed(
+            &self.hat,
+            &self.gpio,
+            cfg.pwm_channel,
+            cfg.dir_pin_bcm,
+            cfg.reversed,
+            speed_pct,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.motor_lease_manager
+                    .set_lease(ipc_channel, conn_id, ttl_ms)
+                    .await;
+                Response::ok(
+                    request.id.clone(),
+                    json!({ "channel": ipc_channel, "speed_pct": speed_pct }),
+                )
+            }
+            Err(e) => {
+                warn!(error = %e, "set_motor_speed failed");
+                Response::err(request.id.clone(), motor_error_code(&e), e.to_string())
+            }
+        }
+    }
+
+    async fn handle_stop_all_motors(&self, request: &Request) -> Response {
+        let mut errors: Vec<String> = Vec::new();
+        for (ipc_ch, cfg) in self.config.motors.iter().enumerate() {
+            if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                error!(error = %e, channel = ipc_ch, "failed to stop motor");
+                errors.push(format!("channel {ipc_ch}: {e}"));
+            } else {
+                self.motor_lease_manager.revoke_channel(ipc_ch as u8).await;
+            }
+        }
+        if errors.is_empty() {
+            Response::ok(
+                request.id.clone(),
+                json!({ "stopped": self.config.motors.len() }),
+            )
+        } else {
+            Response::err(request.id.clone(), "HARDWARE_ERROR", errors.join("; "))
+        }
+    }
+
+    async fn handle_get_motor_status(&self, request: &Request) -> Response {
+        let leases = self.motor_lease_manager.get_active_leases().await;
+        let active: Vec<_> = leases
+            .iter()
+            .map(|(ch, ttl_remaining_ms, conn_id)| {
+                json!({
+                    "channel": ch,
+                    "ttl_remaining_ms": ttl_remaining_ms,
+                    "conn_id": conn_id,
+                })
+            })
+            .collect();
+        Response::ok(request.id.clone(), json!({ "active_leases": active }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Convenience / coordinated methods
+    // -----------------------------------------------------------------------
+
+    /// `drive { speed_pct, ttl_ms? }` — set both configured motors to the
+    /// same speed simultaneously.  All configured motors are commanded in a
+    /// single Rust call to avoid the per-motor latency and race conditions that
+    /// would occur when issuing two separate `set_motor_speed` IPC requests.
+    ///
+    /// Failure-atomic: leases are only committed after **all** motors have been
+    /// successfully commanded.  If any motor fails, already-set motors are
+    /// rolled back (idled) and no leases are committed.
+    async fn handle_drive(&self, request: &Request, conn_id: u64) -> Response {
+        let speed_pct = match request.params.get("speed_pct").and_then(|v| v.as_f64()) {
+            Some(s) if (-100.0..=100.0).contains(&s) => s,
+            Some(s) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("speed_pct {s} is out of range -100.0..=100.0"),
+                );
+            }
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "speed_pct is required",
+                );
+            }
+        };
+        let ttl_ms = match extract_ttl(request, self.config.motor_default_ttl_ms) {
+            Ok(ms) => ms,
+            Err(resp) => return resp,
+        };
+
+        if self.config.motors.is_empty() {
+            return Response::err(request.id.clone(), "INVALID_PARAMS", "no motors configured");
+        }
+
+        // Phase 1: command all motors.  Track which channels succeeded so we
+        // can roll back on partial failure.
+        let mut succeeded: Vec<u8> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for (ipc_ch, cfg) in self.config.motors.iter().enumerate() {
+            match motor::set_motor_speed(
+                &self.hat,
+                &self.gpio,
+                cfg.pwm_channel,
+                cfg.dir_pin_bcm,
+                cfg.reversed,
+                speed_pct,
+            )
+            .await
+            {
+                Ok(()) => succeeded.push(ipc_ch as u8),
+                Err(e) => {
+                    warn!(error = %e, channel = ipc_ch, "drive: set_motor_speed failed");
+                    errors.push(format!("channel {ipc_ch}: {e}"));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            // Phase 2: all succeeded — commit leases now.
+            for ipc_ch in &succeeded {
+                self.motor_lease_manager
+                    .set_lease(*ipc_ch, conn_id, ttl_ms)
+                    .await;
+            }
+            Response::ok(
+                request.id.clone(),
+                json!({
+                    "speed_pct": speed_pct,
+                    "motors": self.config.motors.len(),
+                }),
+            )
+        } else {
+            // Phase 2: partial failure — roll back any motors that did start.
+            let mut rollback_errors: Vec<String> = Vec::new();
+            for ipc_ch in &succeeded {
+                let cfg = &self.config.motors[*ipc_ch as usize];
+                if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                    error!(error = %e, channel = ipc_ch, "drive: rollback idle failed");
+                    rollback_errors.push(format!("channel {ipc_ch}: rollback failed: {e}"));
+                }
+            }
+            let mut all_errors = errors;
+            all_errors.extend(rollback_errors);
+            Response::err(request.id.clone(), "HARDWARE_ERROR", all_errors.join("; "))
+        }
+    }
+
+    /// `steer { angle_deg, ttl_ms? }` — set the steering servo by name.
+    async fn handle_steer(&self, request: &Request, conn_id: u64) -> Response {
+        let ch = match self.config.servos.steering {
+            Some(ch) => ch,
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "steering servo is not configured",
+                );
+            }
+        };
+        self.set_named_servo(request, conn_id, ch, "steering").await
+    }
+
+    /// `pan_camera { angle_deg, ttl_ms? }` — set the camera pan servo by name.
+    async fn handle_pan_camera(&self, request: &Request, conn_id: u64) -> Response {
+        let ch = match self.config.servos.camera_pan {
+            Some(ch) => ch,
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "camera_pan servo is not configured",
+                );
+            }
+        };
+        self.set_named_servo(request, conn_id, ch, "camera_pan")
+            .await
+    }
+
+    /// `tilt_camera { angle_deg, ttl_ms? }` — set the camera tilt servo by name.
+    async fn handle_tilt_camera(&self, request: &Request, conn_id: u64) -> Response {
+        let ch = match self.config.servos.camera_tilt {
+            Some(ch) => ch,
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "camera_tilt servo is not configured",
+                );
+            }
+        };
+        self.set_named_servo(request, conn_id, ch, "camera_tilt")
+            .await
+    }
+
+    /// Common implementation for named-servo angle-set methods.
+    async fn set_named_servo(
+        &self,
+        request: &Request,
+        conn_id: u64,
+        channel: u8,
+        servo_name: &str,
+    ) -> Response {
+        let angle_deg = match request.params.get("angle_deg").and_then(|v| v.as_f64()) {
+            Some(a) if (0.0..=180.0).contains(&a) => a,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "angle_deg is required and must be 0.0–180.0",
+                );
+            }
+        };
+        let ttl_ms = match extract_ttl(request, self.config.servo_default_ttl_ms) {
+            Ok(ms) => ms,
+            Err(resp) => return resp,
+        };
+
+        match servo::set_servo_angle(&self.hat, channel, angle_deg).await {
+            Ok(pulse_us) => {
+                self.lease_manager.set_lease(channel, conn_id, ttl_ms).await;
+                Response::ok(
+                    request.id.clone(),
+                    json!({
+                        "servo": servo_name,
+                        "channel": channel,
+                        "angle_deg": angle_deg,
+                        "pulse_us": pulse_us,
+                    }),
+                )
+            }
+            Err(e) => {
+                warn!(error = %e, servo = servo_name, "set_named_servo failed");
+                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+            }
+        }
+    }
+
+    /// `read_grayscale {}` — read all three grayscale sensor ADC channels and
+    /// return raw values as `[left, center, right]`.
+    async fn handle_read_grayscale(&self, request: &Request) -> Response {
+        let [ch0, ch1, ch2] = self.config.sensors.grayscale;
+        let mut values = [0u16; 3];
+        for (i, ch) in [ch0, ch1, ch2].iter().enumerate() {
+            match adc::read_adc(&self.hat, *ch).await {
+                Ok(raw) => values[i] = raw,
+                Err(e) => {
+                    warn!(error = %e, channel = ch, "read_grayscale ADC read failed");
+                    return Response::err(
+                        request.id.clone(),
+                        hat_error_code(&e),
+                        format!("grayscale channel {ch}: {e}"),
+                    );
+                }
+            }
+        }
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "channels": [ch0, ch1, ch2],
+                "values": [values[0], values[1], values[2]],
             }),
         )
     }
@@ -782,5 +1135,227 @@ mod tests {
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["resets_since_start"], 1);
         assert!(resp["result"]["last_reset_s_ago"].is_number());
+    }
+
+    // ------------------------------------------------------------------
+    // Motor IPC handler tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_motor_speed_valid_returns_channel_and_speed() {
+        let handler = test_handler();
+        // Default config has motor channel 0 = pwm_channel 12, dir_pin BCM 24.
+        let raw =
+            r#"{"id":"mo1","method":"set_motor_speed","params":{"channel":0,"speed_pct":50.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "mo1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 0);
+        assert_eq!(resp["result"]["speed_pct"], 50.0_f64);
+    }
+
+    #[tokio::test]
+    async fn set_motor_speed_channel_out_of_range_returns_invalid_params() {
+        let handler = test_handler();
+        // Default config has 2 motors (indices 0 and 1); index 2 is not configured.
+        let raw =
+            r#"{"id":"mo2","method":"set_motor_speed","params":{"channel":2,"speed_pct":50.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_motor_speed_out_of_range_speed_returns_invalid_params() {
+        let handler = test_handler();
+        let raw =
+            r#"{"id":"mo3","method":"set_motor_speed","params":{"channel":0,"speed_pct":150.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn stop_all_motors_returns_stopped_count() {
+        let handler = test_handler();
+        let raw = r#"{"id":"mo4","method":"stop_all_motors","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "mo4");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["stopped"], 2); // default config has 2 motors
+    }
+
+    #[tokio::test]
+    async fn get_motor_status_empty_returns_no_leases() {
+        let handler = test_handler();
+        let raw = r#"{"id":"mo5","method":"get_motor_status","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "mo5");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["active_leases"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_motor_status_after_set_returns_lease() {
+        let handler = test_handler();
+        let set_raw =
+            r#"{"id":"mo1","method":"set_motor_speed","params":{"channel":1,"speed_pct":75.0}}"#;
+        handler.dispatch(set_raw, 99).await;
+        let raw = r#"{"id":"mo6","method":"get_motor_status","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], true);
+        let leases = resp["result"]["active_leases"].as_array().unwrap();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0]["channel"], 1);
+        assert_eq!(leases[0]["conn_id"], 99);
+    }
+
+    // ------------------------------------------------------------------
+    // Convenience / coordinated method tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drive_sets_both_motors_and_returns_speed_and_count() {
+        let handler = test_handler();
+        let raw = r#"{"id":"d1","method":"drive","params":{"speed_pct":60.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "d1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["speed_pct"], 60.0_f64);
+        assert_eq!(resp["result"]["motors"], 2); // default config has 2 motors
+    }
+
+    #[tokio::test]
+    async fn drive_creates_leases_for_all_motors() {
+        let handler = test_handler();
+        handler
+            .dispatch(
+                r#"{"id":"d1","method":"drive","params":{"speed_pct":30.0}}"#,
+                7,
+            )
+            .await;
+        let status_str = handler
+            .dispatch(r#"{"id":"d2","method":"get_motor_status","params":{}}"#, 0)
+            .await;
+        let status: serde_json::Value = serde_json::from_str(&status_str).unwrap();
+        let leases = status["result"]["active_leases"].as_array().unwrap();
+        assert_eq!(leases.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn drive_invalid_speed_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"d3","method":"drive","params":{"speed_pct":200.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn steer_sets_steering_servo_by_name() {
+        let handler = test_handler();
+        // Default config: steering = channel 2
+        let raw = r#"{"id":"s1","method":"steer","params":{"angle_deg":90.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "s1");
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["servo"], "steering");
+        assert_eq!(resp["result"]["channel"], 2);
+        assert_eq!(resp["result"]["angle_deg"], 90.0_f64);
+        assert_eq!(resp["result"]["pulse_us"], 1500);
+    }
+
+    #[tokio::test]
+    async fn steer_invalid_angle_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"s2","method":"steer","params":{"angle_deg":200.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn pan_camera_sets_pan_servo_by_name() {
+        let handler = test_handler();
+        // Default config: camera_pan = channel 0
+        let raw = r#"{"id":"p1","method":"pan_camera","params":{"angle_deg":45.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["servo"], "camera_pan");
+        assert_eq!(resp["result"]["channel"], 0);
+        assert_eq!(resp["result"]["angle_deg"], 45.0_f64);
+    }
+
+    #[tokio::test]
+    async fn tilt_camera_sets_tilt_servo_by_name() {
+        let handler = test_handler();
+        // Default config: camera_tilt = channel 1
+        let raw = r#"{"id":"t1","method":"tilt_camera","params":{"angle_deg":120.0}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["servo"], "camera_tilt");
+        assert_eq!(resp["result"]["channel"], 1);
+        assert_eq!(resp["result"]["angle_deg"], 120.0_f64);
+    }
+
+    #[tokio::test]
+    async fn read_grayscale_returns_three_channel_values() {
+        // raw bytes 0x00, 0x2A → u16 = 42 (returned for every ADC read)
+        let handler = test_handler_with_adc(0x00, 0x2A);
+        let raw = r#"{"id":"gs1","method":"read_grayscale","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 0).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["id"], "gs1");
+        assert_eq!(resp["ok"], true);
+        // Default grayscale channels are [0, 1, 2]
+        assert_eq!(resp["result"]["channels"], serde_json::json!([0, 1, 2]));
+        assert_eq!(resp["result"]["values"], serde_json::json!([42, 42, 42]));
+    }
+
+    #[tokio::test]
+    async fn drive_missing_speed_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"d4","method":"drive","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn steer_missing_angle_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"s3","method":"steer","params":{}}"#;
+        let resp_str = handler.dispatch(raw, 1).await;
+        let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
+
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
     }
 }

@@ -4,4 +4,38 @@ socket_path = "/run/nomopractic/nomopractic.sock"
 socket_mode = 432  # 0o660
 log_level = "info"
 servo_default_ttl_ms = 500
+motor_default_ttl_ms = 500
 watchdog_poll_ms = 100
+
+# Motor channel configuration — Robot HAT V4 TC1508S H-bridge driver.
+# Each [[motors]] entry maps an IPC motor index (0-based) to a hardware PWM
+# channel (12–15) and a BCM GPIO direction pin.  The entries below match the
+# SunFounder PicarX wiring; adjust pwm_channel, dir_pin_bcm, and reversed for
+# other robot configurations.
+
+[[motors]]
+pwm_channel = 12   # P12
+dir_pin_bcm = 24   # D5 (BCM 24)
+reversed    = false
+
+[[motors]]
+pwm_channel = 13   # P13
+dir_pin_bcm = 23   # D4 (BCM 23)
+reversed    = true  # right motor is wired with reversed polarity on PicarX
+
+# Named servo channel configuration — maps logical servo roles to Robot HAT V4
+# PWM channels (0–11).  Set a channel to the correct PWM output for your
+# wiring; omit the key (or comment it out) to disable that servo.
+# Defaults below match the SunFounder PicarX.
+
+[servos]
+camera_pan  = 0   # P0 — horizontal camera rotation
+camera_tilt = 1   # P1 — vertical camera tilt
+steering    = 2   # P2 — front-wheel steering servo
+
+# Named ADC sensor channel configuration — maps logical sensor roles to Robot
+# HAT V4 ADC channels (0–7).  Defaults below match the SunFounder PicarX
+# grayscale module (A0–A2).
+
+[sensors]
+grayscale = [0, 1, 2]   # A0 = left, A1 = centre, A2 = right
