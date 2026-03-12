@@ -13,7 +13,7 @@
 //  6. distance_cm = elapsed_seconds × SOUND_SPEED_CM_S / 2
 //
 // A configurable timeout (default 20 ms) aborts any step that takes too long.
-// Out-of-range or no-object returns are represented as `None`.
+// Out-of-range or no-object conditions are reported as `UltrasonicError::NoEcho`.
 
 use std::time::Instant;
 
