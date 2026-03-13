@@ -921,3 +921,110 @@ async fn get_mic_gain_over_socket() {
     drop(reader);
     let _ = handle.await;
 }
+
+// ---------------------------------------------------------------------------
+// Calibration IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_calibration_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"cal1","method":"get_calibration","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "cal1");
+    assert_eq!(resp["ok"], true);
+    assert!(
+        resp["result"]["motors"].is_array(),
+        "motors must be an array"
+    );
+    assert!(
+        resp["result"]["servos"].is_object(),
+        "servos must be an object"
+    );
+    assert!(
+        resp["result"]["grayscale"].is_array(),
+        "grayscale must be an array"
+    );
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_motor_calibration_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"cal2","method":"set_motor_calibration","params":{"channel":0,"speed_scale":1.2}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "cal2");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["channel"], 0);
+    assert_eq!(resp["result"]["speed_scale"], 1.2_f64);
+    assert!(resp["result"]["deadband_pct"].is_number());
+    assert!(resp["result"]["reversed"].is_boolean());
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn save_calibration_over_socket() {
+    // Use a temp dir for both the socket and the calibration file so that
+    // the save succeeds even in CI where /etc/nomopractic is not writable.
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("test.sock");
+    let cal_path = dir.path().join("calibration.toml");
+
+    let config = std::sync::Arc::new(nomopractic::config::Config {
+        socket_path: sock_path,
+        calibration_path: cal_path.clone(),
+        ..Default::default()
+    });
+
+    let hat = std::sync::Arc::new(nomopractic::hat::i2c::Hat::new(
+        MockI2c::new(0, 0),
+        config.hat_address,
+    ));
+    let gpio = std::sync::Arc::new(nomopractic::hat::gpio::HatGpio::new(MockGpio::new()));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let cfg = std::sync::Arc::clone(&config);
+    let handle =
+        tokio::spawn(async move { nomopractic::ipc::serve(cfg, hat, gpio, shutdown_rx).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"cal3","method":"save_calibration","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "cal3");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["saved"], true);
+    assert!(cal_path.exists(), "calibration file must exist after save");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}

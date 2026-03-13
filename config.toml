@@ -64,3 +64,11 @@ input_card_index     = 2               # ALSA card index for USB mic (PCM2902)
 input_control        = "Mic Capture"   # ALSA sset control name for capture gain
 default_volume_pct   = 80              # Default output volume (0–100)
 default_mic_gain_pct = 50              # Default mic capture gain (0–100)
+
+# ─── Calibration ────────────────────────────────────────────────────────────
+# Motor, servo, and sensor calibration values are persisted to this file.
+# Runtime changes via `set_motor_calibration`, `set_servo_calibration`, and
+# `calibrate_grayscale` take effect immediately; `save_calibration` writes
+# them here so they survive daemon restarts.
+
+calibration_path = "/etc/nomopractic/calibration.toml"

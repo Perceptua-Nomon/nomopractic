@@ -165,6 +165,11 @@ pub struct Config {
     pub speaker_en_pin_bcm: u8,
     /// ALSA audio mixer configuration (output volume + microphone gain).
     pub audio: AudioConfig,
+    /// Filesystem path for the calibration TOML file.
+    ///
+    /// Loaded at startup; written by `save_calibration`. Override with the
+    /// `NOMON_HAT_CALIBRATION_PATH` environment variable.
+    pub calibration_path: PathBuf,
 }
 
 impl Default for Config {
@@ -198,6 +203,7 @@ impl Default for Config {
             ultrasonic: UltrasonicConfig::default(),
             speaker_en_pin_bcm: 20,
             audio: AudioConfig::default(),
+            calibration_path: PathBuf::from("/etc/nomopractic/calibration.toml"),
         }
     }
 }
@@ -273,6 +279,9 @@ impl Config {
             && let Ok(n) = v.parse()
         {
             self.watchdog_poll_ms = n;
+        }
+        if let Ok(v) = get_env("NOMON_HAT_CALIBRATION_PATH") {
+            self.calibration_path = PathBuf::from(v);
         }
     }
 

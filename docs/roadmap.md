@@ -472,7 +472,8 @@ at startup (falling back to defaults if absent) and written back on
   - `speed_scale`: multiplier on `speed_pct` before PWM write (range 0.5–2.0, default 1.0)
   - `deadband_pct`: minimum duty % below which motor does not spin (range 0.0–20.0, default 0.0)
   - `reversed`: runtime-adjustable direction flip (independent of `MotorConfig.reversed`)
-- [ ] `GrayscaleCalibration { white_raw: u16, black_raw: u16 }` per ADC channel
+- [ ] `GrayscaleCalibration { white_raw: u16, black_raw: u16 }` per sensor position
+  - 3-element fixed array aligned to `config.sensors.grayscale` positions [left=0, center=1, right=2]
   - Defaults: `white_raw = 100`, `black_raw = 3000`; validated `white_raw < black_raw`
 - [ ] `ServoCalibration { trim_us: i16 }` per logical servo name
   - `trim_us`: added to computed `pulse_us` before 500–2500 clamping (range −500–+500, default 0)
@@ -480,7 +481,7 @@ at startup (falling back to defaults if absent) and written back on
 - [ ] Held in `Handler` behind `Arc<tokio::sync::Mutex<CalibrationStore>>`
 - [ ] `CalibrationStore::load_or_default(path)`: loads from TOML file; file absence is not an error
 - [ ] Validation: `speed_scale` ∈ 0.5–2.0; `deadband_pct` ∈ 0.0–20.0; `|trim_us|` ≤ 500; `white_raw < black_raw`
-- [ ] `config.rs`: `calibration_path: String` (default `"/etc/nomopractic/calibration.toml"`; env var `NOMON_HAT_CALIBRATION_PATH`)
+- [ ] `config.rs`: `calibration_path: PathBuf` (default `"/etc/nomopractic/calibration.toml"`; env var `NOMON_HAT_CALIBRATION_PATH`)
 - [ ] `config.toml` updated with `calibration_path` entry
 
 #### 10.1 — Apply Calibration to Hardware Paths
@@ -490,31 +491,55 @@ at startup (falling back to defaults if absent) and written back on
   - Apply `calibration.reversed XOR config.reversed` for final direction
 - [ ] `ipc/handler.rs`: apply `ServoCalibration.trim_us` in `steer`, `pan_camera`, `tilt_camera`:
   - `effective_pulse_us = clamp(computed_pulse_us + trim_us, 500, 2500)`
-- [ ] Calibration read with Mutex guard dropped before any hardware `.await` (no deadlocks)
+- [ ] Calibration `Mutex` guard acquired, value copied, guard dropped before any hardware `.await` (no deadlocks)
 
 #### 10.2 — Normalised Grayscale
 - [ ] `read_grayscale_normalized {}` IPC method:
-  - Reads raw ADC values (reuses `read_grayscale` hardware path)
+  - Reads raw ADC values (reuses `read_grayscale` hardware path via `config.sensors.grayscale`)
   - Per-channel: `normalized = clamp((raw − white_raw) / (black_raw − white_raw), 0.0, 1.0)`
   - Returns `{ channels: [u8; 3], normalized: [f64; 3] }` (0.0 = white/reflective, 1.0 = black/non-reflective)
-- [ ] `RoutineConfig` (Phase 11): supplement `cliff_threshold_raw` with `cliff_threshold_normalized: f64` (default 0.7); explore routine uses normalised threshold when grayscale calibration is present
+  - `channels` mirrors `read_grayscale` — the ADC channel numbers from `config.sensors.grayscale`
+- [ ] Note for Phase 11: `RoutineConfig` will gain `cliff_threshold_normalized: f64` (default 0.7); explore routine uses normalised threshold when calibration is present
 
 #### 10.3 — Calibration IPC Methods
-- [ ] `get_calibration {}` → `{ motors: [...], servos: {...}, grayscale: [...] }` — full snapshot
+- [ ] `get_calibration {}` → full snapshot:
+  - `motors: [{ channel, speed_scale, deadband_pct, reversed }, ...]` — indexed 0…N-1 matching `config.motors`
+  - `servos: { "steering": { trim_us }, "camera_pan": { trim_us }, "camera_tilt": { trim_us } }`
+  - `grayscale: [{ adc_channel, white_raw, black_raw }, ...]` — 3 elements; `adc_channel` taken from `config.sensors.grayscale[i]`
 - [ ] `set_motor_calibration { channel, speed_scale?, deadband_pct?, reversed? }` → `{ channel, speed_scale, deadband_pct, reversed }`
-  - Partial updates accepted; unspecified fields unchanged
-  - `INVALID_PARAMS` if channel out of range
+  - Partial updates: unspecified fields unchanged
+  - `INVALID_PARAMS` if `channel` ≥ `config.motors.len()`
 - [ ] `set_servo_calibration { servo, trim_us }` → `{ servo, trim_us }`
   - `servo` must be `"steering"`, `"camera_pan"`, or `"camera_tilt"`; `INVALID_PARAMS` otherwise
-- [ ] `calibrate_grayscale { channel, surface }` → `{ channel, surface, raw_value, stored: bool }`
+  - Calibration stored regardless of whether that servo is currently enabled (`None`) in config
+- [ ] `calibrate_grayscale { channel, surface }` → `{ channel, adc_channel, surface, raw_value, stored: bool }`
+  - `channel`: sensor position index (0 = left, 1 = center, 2 = right); **not** the ADC bus channel
+  - Actual ADC read uses `config.sensors.grayscale[channel]` for the bus channel
   - `surface`: `"white"` or `"black"`; reads live ADC and stores as `white_raw` or `black_raw`
   - Returns `INVALID_PARAMS` if the resulting `white_raw ≥ black_raw` would violate the constraint
-- [ ] `save_calibration {}` → `{ saved: true, path: "..." }` — writes current store to `calibration_path`
-- [ ] `reset_calibration {}` → `{ reset: true }` — reverts in-memory store to defaults (file not overwritten until `save_calibration`)
+  - `stored` is `false` (and error is returned) when the constraint would be violated
+- [ ] `save_calibration {}` → `{ saved: true, path: "/etc/nomopractic/calibration.toml" }` — writes current store to `calibration_path`
+- [ ] `reset_calibration {}` → `{ reset: true }` — reverts in-memory store to defaults (file not overwritten until next `save_calibration`)
+- [ ] All 7 new methods added to `nomothetic/docs/hat_ipc_schema.md` (authoritative IPC contract)
 
 #### 10.4 — Tests
-- [ ] `src/calibration.rs`: default values, `load_or_default` round-trip, validation errors (speed_scale out of range, `white_raw ≥ black_raw`)
-- [ ] `ipc/handler.rs`: `get_calibration` defaults; `set_motor_calibration` partial update; `set_servo_calibration` valid + invalid servo name; `calibrate_grayscale` white/black capture and constraint violation; `save_calibration`; `reset_calibration`; `read_grayscale_normalized` with defaults and custom calibration
+- [ ] `src/calibration.rs`: default values, `load_or_default` round-trip (write TOML → reload → compare),
+  validation errors (`speed_scale` out of range, `white_raw ≥ black_raw`),
+  partial motor update, reset to defaults (~8 tests)
+- [ ] `ipc/handler.rs`: `get_calibration` defaults; `set_motor_calibration` partial update (speed_scale only);
+  `set_motor_calibration` invalid channel; `set_servo_calibration` valid; `set_servo_calibration` invalid name;
+  `calibrate_grayscale` white capture; `calibrate_grayscale` black capture; `calibrate_grayscale` constraint violation;
+  `save_calibration`; `reset_calibration`; `read_grayscale_normalized` with defaults;
+  `read_grayscale_normalized` with custom calibration (~12 tests)
+
+#### 10.5 — Documentation
+- [ ] `nomothetic/docs/hat_ipc_schema.md`: add full method specs for all 7 new IPC methods
+  (`get_calibration`, `set_motor_calibration`, `set_servo_calibration`, `calibrate_grayscale`,
+  `read_grayscale_normalized`, `save_calibration`, `reset_calibration`)
+- [ ] `nomopractic/docs/architecture.md` Methods Summary table: add Phase 9 audio level methods
+  and all Phase 10 calibration and normalised grayscale methods
+- [ ] `nomothetic/docs/architecture.md` endpoints table: add Phase 9 audio level endpoints
+  and all Phase 10 calibration + `GET /api/sensor/grayscale/normalized` endpoints
 
 #### Phase 10 Exit Criteria
 - [ ] Motor calibration (speed_scale, deadband, direction) applied transparently to all motor commands
@@ -522,7 +547,7 @@ at startup (falling back to defaults if absent) and written back on
 - [ ] `read_grayscale_normalized` returns 0.0–1.0 values based on captured surface references
 - [ ] Calibration persisted to and reloaded from `calibration.toml` across daemon restarts
 - [ ] All tests pass without hardware
-- [ ] `cargo test` — all tests pass (target ≥ 175 tests)
+- [ ] `cargo test` — all tests pass (target ≥ 184 tests)
 - [ ] `cargo clippy -- -D warnings` clean
 - [ ] `cargo fmt --check` clean
 

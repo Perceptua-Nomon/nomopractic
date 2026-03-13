@@ -1,3 +1,4 @@
+pub mod calibration;
 pub mod config;
 pub mod hat;
 pub mod ipc;

@@ -163,6 +163,17 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `read_ultrasonic` | — | `distance_cm` |
 | `enable_speaker` | — | `enabled: true`, `pin_bcm` |
 | `disable_speaker` | — | `enabled: false`, `pin_bcm` |
+| `set_volume` | `volume_pct` (0–100) | `volume_pct` |
+| `get_volume` | — | `volume_pct` |
+| `set_mic_gain` | `gain_pct` (0–100) | `gain_pct` |
+| `get_mic_gain` | — | `gain_pct` |
+| `get_calibration` | — | `motors: [...]`, `servos: {...}`, `grayscale: [...]` |
+| `set_motor_calibration` | `channel`, `speed_scale?`, `deadband_pct?`, `reversed?` | `channel`, `speed_scale`, `deadband_pct`, `reversed` |
+| `set_servo_calibration` | `servo`, `trim_us` | `servo`, `trim_us` |
+| `calibrate_grayscale` | `channel` (0–2), `surface` | `channel`, `adc_channel`, `surface`, `raw_value`, `stored` |
+| `read_grayscale_normalized` | — | `channels: [u8; 3]`, `normalized: [f64; 3]` |
+| `save_calibration` | — | `saved`, `path` |
+| `reset_calibration` | — | `reset` |
 
 ### Error Codes
 
