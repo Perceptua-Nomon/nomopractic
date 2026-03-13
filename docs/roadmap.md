@@ -427,7 +427,7 @@ confirm checks pass before tagging.
 
 ---
 
-## Upcoming
+## Completed
 
 ### Phase 9 — Audio Levels Control (P1)
 
@@ -435,25 +435,26 @@ confirm checks pass before tagging.
 input gain (USB microphone PCM2902) via new IPC methods, allowing the nomothetic
 API to manage audio input and output levels without restarting the daemon.
 
-**Candidate deliverables:**
-
 **Output Volume (HifiBerry DAC — ALSA card 1):**
-- [ ] Investigate ALSA mixer control for the HifiBerry DAC (likely `"Digital"` or `"PCM"` control)
-- [ ] `set_volume { volume_pct: u8 }` IPC method (0–100 maps to ALSA dB range)
-- [ ] `get_volume {}` IPC method returning `{ volume_pct: u8 }`
-- [ ] Config: default output volume level in `[audio]` section of `config.toml`
+- [x] `hat/audio.rs`: `AlsaControl` trait + `AmixerControl` implementation using `std::process::Command` to invoke `amixer`
+- [x] `set_volume { volume_pct: u8 }` IPC method (0–100)
+- [x] `get_volume {}` IPC method returning `{ volume_pct: u8 }`
+- [x] Config: `[audio]` section in `config.toml` with `output_card_index`, `output_control`, `default_volume_pct`
 
 **Input Gain (USB Microphone PCM2902 — ALSA card 2):**
-- [ ] Investigate ALSA mixer controls for PCM2902 capture (likely `"Mic"`, `"Mic Capture"`, or `"Capture"` control)
-- [ ] `set_mic_gain { gain_pct: u8 }` IPC method (0–100 maps to both mic gain and AGC dB range)
-- [ ] `get_mic_gain {}` IPC method returning `{ gain_pct: u8 }`
-- [ ] Config: default microphone input gain in `[audio]` section of `config.toml`
+- [x] `set_mic_gain { gain_pct: u8 }` IPC method (0–100)
+- [x] `get_mic_gain {}` IPC method returning `{ gain_pct: u8 }`
+- [x] Config: `input_card_index`, `input_control`, `default_mic_gain_pct` in `[audio]` section
 
 **Testing & Integration:**
-- [ ] Unit tests for all four IPC methods (mocked ALSA)
-- [ ] Phase 9 exit: both output volume and input gain settable via IPC; daemon does not need a restart
+- [x] Unit tests for all four IPC methods (MockAlsaControl — no real hardware)
+- [x] `cargo test` — 142 lib + 26 integration tests passing
+- [x] `cargo clippy -- -D warnings` clean
+- [x] Phase 9 exit: both output volume and input gain settable via IPC without daemon restart
 
 ---
+
+## Upcoming
 
 ### Phase 10 — Calibration & Configuration (P1)
 

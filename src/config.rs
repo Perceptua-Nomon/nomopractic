@@ -79,6 +79,41 @@ impl Default for SensorChannels {
     }
 }
 
+/// ALSA mixer configuration for audio output (HifiBerry DAC) and input
+/// (USB microphone PCM2902).
+///
+/// Card indices and control names are system-specific; defaults match the
+/// PicarX Robot HAT V4 setup where HifiBerry is card 1 and the USB mic is
+/// card 2.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AudioConfig {
+    /// ALSA card index for the HifiBerry DAC output (default: 1).
+    pub output_card_index: u8,
+    /// ALSA mixer control name for output volume (default: "Digital").
+    pub output_control: String,
+    /// ALSA card index for the USB microphone input (default: 2).
+    pub input_card_index: u8,
+    /// ALSA mixer control name for microphone capture gain (default: "Mic Capture").
+    pub input_control: String,
+    /// Default output volume on first use (0–100, default: 80).
+    pub default_volume_pct: u8,
+    /// Default microphone input gain on first use (0–100, default: 50).
+    pub default_mic_gain_pct: u8,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            output_card_index: 1,
+            output_control: "Digital".into(),
+            input_card_index: 2,
+            input_control: "Mic Capture".into(),
+            default_volume_pct: 80,
+            default_mic_gain_pct: 50,
+        }
+    }
+}
+
 /// Ultrasonic distance sensor GPIO pin assignments.
 ///
 /// The HC-SR04-compatible sensor on PicarX uses D2 (BCM 27) for TRIG and
@@ -128,6 +163,8 @@ pub struct Config {
     pub ultrasonic: UltrasonicConfig,
     /// BCM GPIO pin for the speaker amplifier enable signal. Default: 20.
     pub speaker_en_pin_bcm: u8,
+    /// ALSA audio mixer configuration (output volume + microphone gain).
+    pub audio: AudioConfig,
 }
 
 impl Default for Config {
@@ -160,6 +197,7 @@ impl Default for Config {
             sensors: SensorChannels::default(),
             ultrasonic: UltrasonicConfig::default(),
             speaker_en_pin_bcm: 20,
+            audio: AudioConfig::default(),
         }
     }
 }

@@ -9,6 +9,7 @@ use tracing::{debug, error, warn};
 use super::schema::{Request, Response};
 use crate::config::Config;
 use crate::hat::adc;
+use crate::hat::audio::{AlsaControl, AmixerControl, AudioError};
 use crate::hat::battery;
 use crate::hat::gpio::{self, GpioError, HatGpio};
 use crate::hat::i2c::{Hat, HatError};
@@ -65,10 +66,29 @@ pub struct Handler {
     motor_lease_manager: Arc<LeaseManager>,
     gpio: Arc<HatGpio>,
     mcu_state: tokio::sync::Mutex<McuState>,
+    alsa: Arc<dyn AlsaControl>,
 }
 
 impl Handler {
     pub fn new(config: Arc<Config>, hat: Arc<Hat>, gpio: Arc<HatGpio>) -> Self {
+        let alsa: Arc<dyn AlsaControl> = Arc::new(AmixerControl {
+            output_card_index: config.audio.output_card_index,
+            output_control: config.audio.output_control.clone(),
+            input_card_index: config.audio.input_card_index,
+            input_control: config.audio.input_control.clone(),
+        });
+        Self::with_alsa(config, hat, gpio, alsa)
+    }
+
+    /// Like `new` but accepts an explicit `AlsaControl` implementation.
+    ///
+    /// Used by tests to inject a `MockAlsaControl` without touching real ALSA.
+    pub fn with_alsa(
+        config: Arc<Config>,
+        hat: Arc<Hat>,
+        gpio: Arc<HatGpio>,
+        alsa: Arc<dyn AlsaControl>,
+    ) -> Self {
         Self {
             config,
             start_time: Instant::now(),
@@ -80,6 +100,7 @@ impl Handler {
                 reset_count: 0,
                 last_reset_at: None,
             }),
+            alsa,
         }
     }
 
@@ -171,6 +192,10 @@ impl Handler {
             "read_ultrasonic" => self.handle_read_ultrasonic(&request).await,
             "enable_speaker" => self.handle_enable_speaker(&request).await,
             "disable_speaker" => self.handle_disable_speaker(&request).await,
+            "set_volume" => self.handle_set_volume(&request).await,
+            "get_volume" => self.handle_get_volume(&request).await,
+            "set_mic_gain" => self.handle_set_mic_gain(&request).await,
+            "get_mic_gain" => self.handle_get_mic_gain(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -320,7 +345,9 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("unknown pin '{pin_name}'; valid: D4, D5, MCURST, SW, LED"),
+                    format!(
+                        "unknown pin '{pin_name}'; valid: D2, D3, D4, D5, MCURST, SW, LED, SPEAKER_EN"
+                    ),
                 );
             }
         };
@@ -347,7 +374,9 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("unknown pin '{pin_name}'; valid output pins: D4, D5, MCURST, LED"),
+                    format!(
+                        "unknown pin '{pin_name}'; valid output pins: D2, D4, D5, MCURST, LED, SPEAKER_EN"
+                    ),
                 );
             }
         };
@@ -799,6 +828,92 @@ impl Handler {
             ),
             Err(e) => Response::err(request.id.clone(), gpio_error_code(&e), e.to_string()),
         }
+    }
+
+    /// `set_volume { volume_pct: u8 }` — set output volume via ALSA mixer.
+    async fn handle_set_volume(&self, request: &Request) -> Response {
+        let volume_pct = match request.params.get("volume_pct").and_then(|v| v.as_u64()) {
+            Some(p) if p <= 100 => p as u8,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "volume_pct is required and must be 0–100",
+                );
+            }
+        };
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.set_volume_pct(volume_pct)).await {
+            Ok(Ok(())) => {
+                tracing::info!(volume_pct, "output volume set");
+                Response::ok(request.id.clone(), json!({ "volume_pct": volume_pct }))
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "set_volume failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `get_volume {}` — read current output volume from ALSA mixer.
+    async fn handle_get_volume(&self, request: &Request) -> Response {
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.get_volume_pct()).await {
+            Ok(Ok(pct)) => Response::ok(request.id.clone(), json!({ "volume_pct": pct })),
+            Ok(Err(e)) => {
+                warn!(error = %e, "get_volume failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `set_mic_gain { gain_pct: u8 }` — set microphone capture gain via ALSA.
+    async fn handle_set_mic_gain(&self, request: &Request) -> Response {
+        let gain_pct = match request.params.get("gain_pct").and_then(|v| v.as_u64()) {
+            Some(p) if p <= 100 => p as u8,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "gain_pct is required and must be 0–100",
+                );
+            }
+        };
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.set_mic_gain_pct(gain_pct)).await {
+            Ok(Ok(())) => {
+                tracing::info!(gain_pct, "microphone gain set");
+                Response::ok(request.id.clone(), json!({ "gain_pct": gain_pct }))
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "set_mic_gain failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `get_mic_gain {}` — read current microphone capture gain from ALSA.
+    async fn handle_get_mic_gain(&self, request: &Request) -> Response {
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.get_mic_gain_pct()).await {
+            Ok(Ok(pct)) => Response::ok(request.id.clone(), json!({ "gain_pct": pct })),
+            Ok(Err(e)) => {
+                warn!(error = %e, "get_mic_gain failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+}
+
+/// Classify an `AudioError` into an IPC error code string.
+fn alsa_error_code(e: &AudioError) -> &'static str {
+    match e {
+        AudioError::Command(_) | AudioError::Io(_) => "HARDWARE_ERROR",
+        AudioError::Parse(_) => "INTERNAL_ERROR",
     }
 }
 
@@ -1600,5 +1715,203 @@ mod tests {
             !pin_high,
             "speaker enable pin should be LOW after disable_speaker"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Mock AlsaControl for audio level tests
+    // ------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+
+    use crate::hat::audio::{AlsaControl, AudioError};
+
+    struct MockAlsaControl {
+        volume: AtomicU8,
+        mic_gain: AtomicU8,
+        fail: bool,
+    }
+
+    impl MockAlsaControl {
+        fn new(volume: u8, mic_gain: u8) -> Self {
+            Self {
+                volume: AtomicU8::new(volume),
+                mic_gain: AtomicU8::new(mic_gain),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                volume: AtomicU8::new(0),
+                mic_gain: AtomicU8::new(0),
+                fail: true,
+            }
+        }
+    }
+
+    impl AlsaControl for MockAlsaControl {
+        fn get_volume_pct(&self) -> Result<u8, AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            Ok(self.volume.load(AtomicOrdering::SeqCst))
+        }
+
+        fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            self.volume.store(pct, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+
+        fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            Ok(self.mic_gain.load(AtomicOrdering::SeqCst))
+        }
+
+        fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            self.mic_gain.store(pct, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_handler_with_mock_alsa(mock: MockAlsaControl) -> Handler {
+        let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
+        let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+        Handler::with_alsa(Arc::new(Config::default()), hat, gpio, Arc::new(mock))
+    }
+
+    // ------------------------------------------------------------------
+    // set_volume / get_volume
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_volume_stores_percentage_and_returns_it() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"v1","method":"set_volume","params":{"volume_pct":80}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["volume_pct"], 80);
+    }
+
+    #[tokio::test]
+    async fn get_volume_returns_stored_percentage() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(65, 40));
+        let raw = r#"{"id":"v2","method":"get_volume","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["volume_pct"], 65);
+    }
+
+    #[tokio::test]
+    async fn set_volume_rejects_out_of_range() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"v3","method":"set_volume","params":{"volume_pct":101}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_volume_missing_param_returns_invalid_params() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"v4","method":"set_volume","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_volume_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"v5","method":"set_volume","params":{"volume_pct":50}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    #[tokio::test]
+    async fn get_volume_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"v6","method":"get_volume","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    // ------------------------------------------------------------------
+    // set_mic_gain / get_mic_gain
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_mic_gain_stores_percentage_and_returns_it() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"g1","method":"set_mic_gain","params":{"gain_pct":70}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["gain_pct"], 70);
+    }
+
+    #[tokio::test]
+    async fn get_mic_gain_returns_stored_percentage() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(40, 35));
+        let raw = r#"{"id":"g2","method":"get_mic_gain","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["gain_pct"], 35);
+    }
+
+    #[tokio::test]
+    async fn set_mic_gain_rejects_out_of_range() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"g3","method":"set_mic_gain","params":{"gain_pct":200}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_mic_gain_missing_param_returns_invalid_params() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"g4","method":"set_mic_gain","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_mic_gain_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"g5","method":"set_mic_gain","params":{"gain_pct":50}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    #[tokio::test]
+    async fn get_mic_gain_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"g6","method":"get_mic_gain","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
     }
 }

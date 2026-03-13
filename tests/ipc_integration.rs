@@ -785,3 +785,139 @@ async fn write_gpio_input_pin_returns_invalid_params_over_socket() {
     drop(reader);
     let _ = handle.await;
 }
+
+#[tokio::test]
+async fn set_volume_valid_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"vol1","method":"set_volume","params":{"volume_pct":75}}"#,
+    )
+    .await;
+
+    // AmixerControl will fail because `amixer` is not present in the test
+    // environment — what matters is that the method is recognised and the
+    // result is either ok (amixer available) or a HARDWARE_ERROR (not available),
+    // never an UNKNOWN_METHOD or INVALID_PARAMS.
+    assert_eq!(resp["id"], "vol1");
+    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
+    assert_ne!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_volume_out_of_range_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"vol2","method":"set_volume","params":{"volume_pct":101}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "vol2");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_volume_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"vol3","method":"get_volume","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "vol3");
+    // As with set_volume, amixer may not be present; the method must at least
+    // be dispatched (no UNKNOWN_METHOD).
+    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_mic_gain_valid_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"mg1","method":"set_mic_gain","params":{"gain_pct":50}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "mg1");
+    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
+    assert_ne!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_mic_gain_out_of_range_returns_invalid_params_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"mg2","method":"set_mic_gain","params":{"gain_pct":200}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "mg2");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_mic_gain_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"mg3","method":"get_mic_gain","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "mg3");
+    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
