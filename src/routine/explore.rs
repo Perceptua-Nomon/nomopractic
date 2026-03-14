@@ -96,38 +96,16 @@ pub async fn explore_task(
             stats.cliffs_avoided += 1;
             warn!("explore_task: cliff detected — avoiding");
             stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            drive_all(
+            avoidance_manoeuvre(
                 &hat,
                 &gpio,
                 &config,
                 &calibration,
                 &motor_lease_manager,
+                &params,
                 motor_lease_ttl_ms,
-                -params.speed_pct,
             )
             .await;
-            tokio::time::sleep(params.avoidance_backup).await;
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            steer_channel(
-                &hat,
-                &config,
-                &calibration,
-                90.0 + params.avoidance_turn_angle_deg,
-            )
-            .await;
-            drive_all(
-                &hat,
-                &gpio,
-                &config,
-                &calibration,
-                &motor_lease_manager,
-                motor_lease_ttl_ms,
-                params.speed_pct,
-            )
-            .await;
-            tokio::time::sleep(params.avoidance_backup).await;
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
         }
 
@@ -136,38 +114,16 @@ pub async fn explore_task(
             stats.obstacles_avoided += 1;
             warn!("explore_task: obstacle detected — avoiding");
             stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            drive_all(
+            avoidance_manoeuvre(
                 &hat,
                 &gpio,
                 &config,
                 &calibration,
                 &motor_lease_manager,
+                &params,
                 motor_lease_ttl_ms,
-                -params.speed_pct,
             )
             .await;
-            tokio::time::sleep(params.avoidance_backup).await;
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            steer_channel(
-                &hat,
-                &config,
-                &calibration,
-                90.0 + params.avoidance_turn_angle_deg,
-            )
-            .await;
-            drive_all(
-                &hat,
-                &gpio,
-                &config,
-                &calibration,
-                &motor_lease_manager,
-                motor_lease_ttl_ms,
-                params.speed_pct,
-            )
-            .await;
-            tokio::time::sleep(params.avoidance_backup).await;
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
         }
 
@@ -191,6 +147,66 @@ pub async fn explore_task(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Reverse, steer away, then drive forward in an arc until the path is clear
+/// or `avoidance_backup` elapses.  Steering is reset to 90° (straight) before
+/// returning.  The caller must stop the motors before calling this function.
+async fn avoidance_manoeuvre(
+    hat: &Hat,
+    gpio: &HatGpio,
+    config: &Config,
+    calibration: &Mutex<CalibrationStore>,
+    motor_lease_manager: &LeaseManager,
+    params: &ExploreParams,
+    motor_lease_ttl_ms: u64,
+) {
+    // 1. Reverse for avoidance_backup duration.
+    drive_all(
+        hat,
+        gpio,
+        config,
+        calibration,
+        motor_lease_manager,
+        motor_lease_ttl_ms,
+        -params.speed_pct,
+    )
+    .await;
+    tokio::time::sleep(params.avoidance_backup).await;
+    stop_motors_and_revoke(hat, config, motor_lease_manager).await;
+
+    // 2. Steer away from the obstacle.
+    steer_channel(hat, config, calibration, 90.0 + params.avoidance_turn_angle_deg).await;
+
+    // 3. Drive forward in an arc, polling the sensors every loop_interval.
+    //    Exit as soon as the path is clear; fall back to avoidance_backup as a
+    //    maximum duration so the main loop can retry from the new position.
+    let turn_start = Instant::now();
+    loop {
+        if turn_start.elapsed() >= params.avoidance_backup {
+            break;
+        }
+        drive_all(
+            hat,
+            gpio,
+            config,
+            calibration,
+            motor_lease_manager,
+            motor_lease_ttl_ms,
+            params.speed_pct,
+        )
+        .await;
+        tokio::time::sleep(params.loop_interval).await;
+        let path_clear = read_ultrasonic(gpio, config, params).await;
+        let cliff = read_normalized_cliff(hat, config, calibration, params).await;
+        if path_clear && !cliff {
+            break;
+        }
+    }
+    stop_motors_and_revoke(hat, config, motor_lease_manager).await;
+
+    // 4. Return steering to straight.
+    steer_channel(hat, config, calibration, 90.0).await;
+}
 
 /// Stop all configured motors and revoke their leases (best-effort).
 async fn stop_motors_and_revoke(hat: &Hat, config: &Config, motor_lease_manager: &LeaseManager) {
