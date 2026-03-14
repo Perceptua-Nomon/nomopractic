@@ -97,18 +97,20 @@ impl Handler {
         let calibration_store =
             CalibrationStore::load_or_default(&config.calibration_path, n_motors);
         let calibration = Arc::new(tokio::sync::Mutex::new(calibration_store));
+        let motor_lease_manager = Arc::new(LeaseManager::new());
         let routine = Arc::new(tokio::sync::Mutex::new(RoutineEngine::new(
             hat.clone(),
             gpio.clone(),
             config.clone(),
             calibration.clone(),
+            motor_lease_manager.clone(),
         )));
         Self {
             config,
             start_time: Instant::now(),
             hat,
             lease_manager: Arc::new(LeaseManager::new()),
-            motor_lease_manager: Arc::new(LeaseManager::new()),
+            motor_lease_manager,
             gpio,
             mcu_state: tokio::sync::Mutex::new(McuState {
                 reset_count: 0,
@@ -1124,9 +1126,8 @@ impl Handler {
             .params
             .get("trim_us")
             .and_then(|v| v.as_i64())
-            .map(|v| v as i16)
         {
-            Some(t) if CalibrationStore::valid_trim_us(t) => t,
+            Some(v) if (-500..=500).contains(&v) => v as i16,
             Some(_) => {
                 return Response::err(
                     request.id.clone(),
@@ -1398,7 +1399,7 @@ impl Handler {
         ) {
             Ok(uptime) => Response::ok(
                 request.id.clone(),
-                json!({ "name": name, "started_at_uptime_s": uptime }),
+                json!({ "name": name, "started_at_unix_s": uptime }),
             ),
             Err("ALREADY_RUNNING") => Response::err(
                 request.id.clone(),
@@ -1415,24 +1416,56 @@ impl Handler {
 
     /// `stop_routine {}` — stop the active routine and return final stats.
     async fn handle_stop_routine(&self, request: &Request) -> Response {
-        let mut engine = self.routine.lock().await;
-        match engine.stop().await {
-            Ok(result) => Response::ok(
-                request.id.clone(),
-                json!({
-                    "name": result.name,
-                    "ran_for_s": result.ran_for_s,
-                    "obstacles_avoided": result.obstacles_avoided,
-                    "cliffs_avoided": result.cliffs_avoided,
-                    "stop_reason": result.stop_reason,
-                }),
-            ),
-            Err(_) => Response::err(
+        // Phase 1: Extract the active routine under the lock, then drop it
+        // so concurrent start/status calls are not blocked during the async wait.
+        let active = {
+            let mut engine = self.routine.lock().await;
+            engine.take_active()
+        };
+
+        let Some((name, started_at, stop_flag, mut handle)) = active else {
+            return Response::err(
                 request.id.clone(),
                 "INVALID_PARAMS",
                 "no routine is currently running",
-            ),
-        }
+            );
+        };
+
+        // Phase 2: Signal stop and await the task outside the lock.
+        use std::sync::atomic::Ordering;
+        stop_flag.store(true, Ordering::Relaxed);
+        let ran_for_s = started_at.elapsed().as_secs();
+
+        let (stats, stop_reason) =
+            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => (crate::routine::RoutineStats::default(), "error".to_string()),
+                Err(_timeout) => {
+                    // Timed out — abort the detached task and idle motors.
+                    handle.abort();
+                    let _ = handle.await;
+                    for cfg in &self.config.motors {
+                        if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                            error!(error = %e, pwm_channel = cfg.pwm_channel, "stop_routine: SAFETY: failed to idle motor after task abort");
+                        }
+                    }
+                    self.motor_lease_manager
+                        .release_connection(crate::routine::ROUTINE_CONN_ID)
+                        .await;
+                    (crate::routine::RoutineStats::default(), "timeout_abort".to_string())
+                }
+            };
+
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "name": name,
+                "ran_for_s": ran_for_s,
+                "obstacles_avoided": stats.obstacles_avoided,
+                "cliffs_avoided": stats.cliffs_avoided,
+                "stop_reason": stop_reason,
+            }),
+        )
     }
 
     /// `get_routine_status {}` — return current routine state without
@@ -2714,7 +2747,7 @@ mod tests {
             serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["name"], "explore");
-        assert!(resp["result"]["started_at_uptime_s"].is_number());
+        assert!(resp["result"]["started_at_unix_s"].is_number());
     }
 
     #[tokio::test]

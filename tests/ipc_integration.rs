@@ -1,13 +1,16 @@
 // Integration test: start IPC listener, connect, send requests, verify responses.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
+use nomopractic::hat::audio::{AlsaControl, AudioError};
 use nomopractic::hat::gpio::{GpioBus, GpioError, HatGpio};
 use nomopractic::hat::i2c::{Hat, HatError, I2cBus};
+use nomopractic::ipc::handler::Handler;
 
 // ---------------------------------------------------------------------------
 // Mock I2C bus
@@ -68,6 +71,41 @@ impl GpioBus for MockGpio {
 }
 
 // ---------------------------------------------------------------------------
+// Mock ALSA control (hermetic — never touches the host mixer)
+// ---------------------------------------------------------------------------
+
+struct MockAlsaControl {
+    volume: AtomicU8,
+    mic_gain: AtomicU8,
+}
+
+impl MockAlsaControl {
+    fn new() -> Self {
+        Self {
+            volume: AtomicU8::new(50),
+            mic_gain: AtomicU8::new(50),
+        }
+    }
+}
+
+impl AlsaControl for MockAlsaControl {
+    fn get_volume_pct(&self) -> Result<u8, AudioError> {
+        Ok(self.volume.load(AtomicOrdering::SeqCst))
+    }
+    fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
+        self.volume.store(pct, AtomicOrdering::SeqCst);
+        Ok(())
+    }
+    fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
+        Ok(self.mic_gain.load(AtomicOrdering::SeqCst))
+    }
+    fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
+        self.mic_gain.store(pct, AtomicOrdering::SeqCst);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test server helpers
 // ---------------------------------------------------------------------------
 
@@ -102,12 +140,20 @@ async fn start_test_server_with_adc(
 
     let hat = Arc::new(Hat::new(MockI2c::new(hi, lo), config.hat_address));
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+    let alsa: Arc<dyn AlsaControl> = Arc::new(MockAlsaControl::new());
+
+    let handler = Arc::new(Handler::with_alsa(
+        Arc::clone(&config),
+        hat,
+        gpio,
+        alsa,
+    ));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let cfg = Arc::clone(&config);
-    let handle =
-        tokio::spawn(async move { nomopractic::ipc::serve(cfg, hat, gpio, shutdown_rx).await });
+    let handle = tokio::spawn(async move {
+        nomopractic::ipc::serve_with_handler(handler, shutdown_rx).await
+    });
 
     // Give the listener a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -799,13 +845,10 @@ async fn set_volume_valid_over_socket() {
     )
     .await;
 
-    // AmixerControl will fail because `amixer` is not present in the test
-    // environment — what matters is that the method is recognised and the
-    // result is either ok (amixer available) or a HARDWARE_ERROR (not available),
-    // never an UNKNOWN_METHOD or INVALID_PARAMS.
+    // MockAlsaControl always succeeds — assert a full success response.
     assert_eq!(resp["id"], "vol1");
-    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
-    assert_ne!(resp["error"]["code"], "INVALID_PARAMS");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["volume_pct"], 75);
 
     let _ = shutdown_tx.send(true);
     drop(reader);
@@ -848,9 +891,8 @@ async fn get_volume_over_socket() {
     .await;
 
     assert_eq!(resp["id"], "vol3");
-    // As with set_volume, amixer may not be present; the method must at least
-    // be dispatched (no UNKNOWN_METHOD).
-    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
+    assert_eq!(resp["ok"], true);
+    assert!(resp["result"]["volume_pct"].is_number());
 
     let _ = shutdown_tx.send(true);
     drop(reader);
@@ -871,8 +913,8 @@ async fn set_mic_gain_valid_over_socket() {
     .await;
 
     assert_eq!(resp["id"], "mg1");
-    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
-    assert_ne!(resp["error"]["code"], "INVALID_PARAMS");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["gain_pct"], 50);
 
     let _ = shutdown_tx.send(true);
     drop(reader);
@@ -915,7 +957,8 @@ async fn get_mic_gain_over_socket() {
     .await;
 
     assert_eq!(resp["id"], "mg3");
-    assert_ne!(resp["error"]["code"], "UNKNOWN_METHOD");
+    assert_eq!(resp["ok"], true);
+    assert!(resp["result"]["gain_pct"].is_number());
 
     let _ = shutdown_tx.send(true);
     drop(reader);

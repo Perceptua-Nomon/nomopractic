@@ -29,6 +29,19 @@ pub async fn serve(
     gpio: Arc<HatGpio>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat), gpio));
+    serve_with_handler(handler, shutdown).await
+}
+
+/// Like [`serve`] but accepts an already-constructed `Handler`.
+///
+/// Used by tests to inject mock hardware (e.g. `MockAlsaControl`) without
+/// affecting the real system mixer.
+pub async fn serve_with_handler(
+    handler: Arc<Handler>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let config = handler.config();
     let sock_path = &config.socket_path;
 
     // Remove stale socket file if it exists, but only if it is a Unix socket.
@@ -57,8 +70,6 @@ pub async fn serve(
     let listener = UnixListener::bind(sock_path)?;
     set_socket_permissions(sock_path, config.socket_mode)?;
     info!(path = %sock_path.display(), "IPC listener started");
-
-    let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat), gpio));
 
     // Spawn the TTL lease watchdog — idles servo channels when leases expire.
     {

@@ -19,9 +19,10 @@ use crate::calibration::CalibrationStore;
 use crate::config::Config;
 use crate::hat::gpio::HatGpio;
 use crate::hat::i2c::Hat;
+use crate::hat::servo::{self as servo_hat, LeaseManager};
 use crate::hat::{adc, motor, servo, ultrasonic};
 
-use super::RoutineStats;
+use super::{ROUTINE_CONN_ID, RoutineStats};
 
 /// Per-run parameters for `explore_task`.
 #[derive(Clone)]
@@ -52,6 +53,7 @@ pub async fn explore_task(
     gpio: Arc<HatGpio>,
     config: Arc<Config>,
     calibration: Arc<Mutex<CalibrationStore>>,
+    motor_lease_manager: Arc<LeaseManager>,
     params: ExploreParams,
     stop_flag: Arc<AtomicBool>,
 ) -> (RoutineStats, String) {
@@ -65,18 +67,21 @@ pub async fn explore_task(
         "explore_task: started"
     );
 
+    // TTL for motor leases: refresh every loop_interval; give 3× margin.
+    let motor_lease_ttl_ms = params.loop_interval.as_millis() as u64 * 3;
+
     loop {
         // 1. Check stop flag.
         if stop_flag.load(Ordering::Relaxed) {
             info!("explore_task: stop commanded");
-            stop_motors(&hat, &config).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
             return (stats, "commanded".to_string());
         }
 
         // 2. Check max duration.
         if started.elapsed() >= params.max_duration {
             info!("explore_task: max_duration reached");
-            stop_motors(&hat, &config).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
             return (stats, "timeout".to_string());
         }
 
@@ -90,13 +95,23 @@ pub async fn explore_task(
         if cliff_detected {
             stats.cliffs_avoided += 1;
             warn!("explore_task: cliff detected — avoiding");
-            stop_motors(&hat, &config).await;
-            drive_all(&hat, &gpio, &config, &calibration, -params.speed_pct).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
+            drive_all(
+                &hat,
+                &gpio,
+                &config,
+                &calibration,
+                &motor_lease_manager,
+                motor_lease_ttl_ms,
+                -params.speed_pct,
+            )
+            .await;
             tokio::time::sleep(params.avoidance_backup).await;
-            stop_motors(&hat, &config).await;
-            steer_channel(&hat, &config, 90.0 + params.avoidance_turn_angle_deg).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
+            steer_channel(&hat, &config, &calibration, 90.0 + params.avoidance_turn_angle_deg)
+                .await;
             tokio::time::sleep(Duration::from_millis(400)).await;
-            steer_channel(&hat, &config, 90.0).await;
+            steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
         }
 
@@ -104,19 +119,38 @@ pub async fn explore_task(
         if !distance_ok {
             stats.obstacles_avoided += 1;
             warn!("explore_task: obstacle detected — avoiding");
-            stop_motors(&hat, &config).await;
-            drive_all(&hat, &gpio, &config, &calibration, -params.speed_pct).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
+            drive_all(
+                &hat,
+                &gpio,
+                &config,
+                &calibration,
+                &motor_lease_manager,
+                motor_lease_ttl_ms,
+                -params.speed_pct,
+            )
+            .await;
             tokio::time::sleep(params.avoidance_backup).await;
-            stop_motors(&hat, &config).await;
-            steer_channel(&hat, &config, 90.0 + params.avoidance_turn_angle_deg).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
+            steer_channel(&hat, &config, &calibration, 90.0 + params.avoidance_turn_angle_deg)
+                .await;
             tokio::time::sleep(Duration::from_millis(400)).await;
-            steer_channel(&hat, &config, 90.0).await;
+            steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
         }
 
         // 7. Clear — drive forward.
-        drive_all(&hat, &gpio, &config, &calibration, params.speed_pct).await;
-        steer_channel(&hat, &config, 90.0).await;
+        drive_all(
+            &hat,
+            &gpio,
+            &config,
+            &calibration,
+            &motor_lease_manager,
+            motor_lease_ttl_ms,
+            params.speed_pct,
+        )
+        .await;
+        steer_channel(&hat, &config, &calibration, 90.0).await;
 
         tokio::time::sleep(params.loop_interval).await;
     }
@@ -126,21 +160,31 @@ pub async fn explore_task(
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Stop all configured motors (best-effort; errors logged but not fatal).
-async fn stop_motors(hat: &Hat, config: &Config) {
+/// Stop all configured motors and revoke their leases (best-effort).
+async fn stop_motors_and_revoke(
+    hat: &Hat,
+    config: &Config,
+    motor_lease_manager: &LeaseManager,
+) {
     for cfg in &config.motors {
         if let Err(e) = motor::idle_motor(hat, cfg.pwm_channel).await {
             warn!(error = %e, pwm_channel = cfg.pwm_channel, "explore: stop_motors failed");
         }
     }
+    motor_lease_manager
+        .release_connection(ROUTINE_CONN_ID)
+        .await;
 }
 
-/// Command all motors to `speed_pct`, applying motor calibration.
+/// Command all motors to `speed_pct`, applying motor calibration and refreshing leases.
+#[allow(clippy::too_many_arguments)]
 async fn drive_all(
     hat: &Hat,
     gpio: &HatGpio,
     config: &Config,
     calibration: &Mutex<CalibrationStore>,
+    motor_lease_manager: &LeaseManager,
+    lease_ttl_ms: u64,
     speed_pct: f64,
 ) {
     // Snapshot calibration for all channels; drop lock before hardware calls.
@@ -166,7 +210,7 @@ async fn drive_all(
 
     for (i, cfg) in config.motors.iter().enumerate() {
         let (effective, reversed) = cal_entries[i];
-        if let Err(e) = motor::set_motor_speed(
+        match motor::set_motor_speed(
             hat,
             gpio,
             cfg.pwm_channel,
@@ -176,27 +220,50 @@ async fn drive_all(
         )
         .await
         {
-            warn!(error = %e, channel = i, "explore: drive_all set_motor_speed failed");
+            Ok(()) => {
+                motor_lease_manager
+                    .set_lease(i as u8, ROUTINE_CONN_ID, lease_ttl_ms)
+                    .await;
+            }
+            Err(e) => {
+                warn!(error = %e, channel = i, "explore: drive_all set_motor_speed failed");
+            }
         }
     }
 }
 
-/// Set the steering servo to `angle_deg` if configured; errors are logged.
-async fn steer_channel(hat: &Hat, config: &Config, angle_deg: f64) {
+/// Set the steering servo to `angle_deg` applying calibration trim; errors are logged.
+async fn steer_channel(
+    hat: &Hat,
+    config: &Config,
+    calibration: &Mutex<CalibrationStore>,
+    angle_deg: f64,
+) {
     let ch = match config.servos.steering {
         Some(ch) => ch,
         None => return, // steering not configured
     };
+    // Read steering trim; drop lock before hardware call.
+    let trim_us: i16 = {
+        let guard = calibration.lock().await;
+        guard
+            .servos
+            .get("steering")
+            .map(|s| s.trim_us)
+            .unwrap_or(0)
+    };
     let angle_clamped = angle_deg.clamp(0.0, 180.0);
-    if let Err(e) = servo::set_servo_angle(hat, ch, angle_clamped).await {
+    let raw_pulse = servo_hat::angle_to_pulse_us(angle_clamped);
+    let effective_pulse = (raw_pulse as i32 + trim_us as i32).clamp(500, 2500) as u16;
+    if let Err(e) = servo::set_servo_pulse_us(hat, ch, effective_pulse).await {
         warn!(error = %e, angle_deg, "explore: steer_channel failed");
     }
 }
 
 /// Read the ultrasonic distance and return `true` if the path is clear.
 ///
-/// Returns `true` (clear) on any measurement error so the robot does not
-/// get stuck if the sensor is temporarily unavailable.
+/// Returns `false` (obstacle) on any measurement error so that a sensor
+/// failure causes the robot to stop rather than drive into an obstacle.
 async fn read_ultrasonic(gpio: &HatGpio, config: &Config, params: &ExploreParams) -> bool {
     let cfg = &config.ultrasonic;
     match ultrasonic::read_distance_cm(gpio, cfg.trig_pin_bcm, cfg.echo_pin_bcm, cfg.timeout_ms)
@@ -204,8 +271,8 @@ async fn read_ultrasonic(gpio: &HatGpio, config: &Config, params: &ExploreParams
     {
         Ok(dist) => dist >= params.obstacle_threshold_cm,
         Err(e) => {
-            warn!(error = %e, "explore: ultrasonic read failed — treating as clear");
-            true
+            warn!(error = %e, "explore: ultrasonic read failed — stopping as safety measure");
+            false
         }
     }
 }
