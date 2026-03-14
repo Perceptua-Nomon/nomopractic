@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn default_servo_trim_is_zero() {
         let store = CalibrationStore::default_for(2);
-        for (_, s) in &store.servos {
+        for s in store.servos.values() {
             assert_eq!(s.trim_us, 0);
         }
     }

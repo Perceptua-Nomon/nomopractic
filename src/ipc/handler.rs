@@ -1569,7 +1569,7 @@ mod tests {
         }
 
         fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
-            Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
+            Ok(self.state.get(&pin_bcm).copied().unwrap_or(false))
         }
     }
 
@@ -2664,9 +2664,10 @@ mod tests {
     async fn save_calibration_writes_to_configured_path() {
         let dir = tempfile::tempdir().unwrap();
         let cal_path = dir.path().join("calibration.toml");
-        let mut config = Config::default();
-        config.calibration_path = cal_path.clone();
-        let handler = test_handler_with_config(Arc::new(config));
+        let handler = test_handler_with_config(Arc::new(Config {
+            calibration_path: cal_path.clone(),
+            ..Default::default()
+        }));
 
         let raw = r#"{"id":"c10","method":"save_calibration","params":{}}"#;
         let resp: serde_json::Value =

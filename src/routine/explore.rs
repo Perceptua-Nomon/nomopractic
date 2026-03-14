@@ -252,7 +252,10 @@ async fn steer_channel(
     // Read steering trim; drop lock before hardware call.
     let trim_us: i16 = {
         let guard = calibration.lock().await;
-        guard.servos.get("steering").map(|s| s.trim_us).unwrap_or(0)
+        match guard.servos.get("steering") {
+            Some(s) => s.trim_us,
+            None => 0,
+        }
     };
     let angle_clamped = angle_deg.clamp(0.0, 180.0);
     let raw_pulse = servo_hat::angle_to_pulse_us(angle_clamped);

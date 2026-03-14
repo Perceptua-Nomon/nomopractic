@@ -1,0 +1,32 @@
+    Checking nomopractic v0.4.0 (/home/aphorikles/perceptua-nomon/nomopractic)
+error: you seem to want to iterate on a map's values
+   --> src/calibration.rs:298:23
+    |
+298 |         for (_, s) in &store.servos {
+    |                       ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#for_kv_map
+    = note: `-D clippy::for-kv-map` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::for_kv_map)]`
+help: use the corresponding method
+    |
+298 -         for (_, s) in &store.servos {
+298 +         for s in store.servos.values() {
+    |
+
+error: field assignment outside of initializer for an instance created with Default::default()
+    --> src/ipc/handler.rs:2668:9
+     |
+2668 |         config.calibration_path = cal_path.clone();
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+note: consider initializing the variable with `config::Config { calibration_path: cal_path.clone(), ..Default::default() }` and removing relevant reassignments
+    --> src/ipc/handler.rs:2667:9
+     |
+2667 |         let mut config = Config::default();
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#field_reassign_with_default
+     = note: `-D clippy::field-reassign-with-default` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::field_reassign_with_default)]`
+
+error: could not compile `nomopractic` (lib test) due to 2 previous errors

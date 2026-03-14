@@ -135,13 +135,13 @@ impl RoutineEngine {
         let motor_lease_manager = self.motor_lease_manager.clone();
 
         let params = crate::routine::explore::ExploreParams {
-            speed_pct: speed_pct.unwrap_or(config.routine.explore_speed_pct),
+            speed_pct: speed_pct.unwrap_or_else(|| config.routine.explore_speed_pct),
             obstacle_threshold_cm: obstacle_threshold_cm
-                .unwrap_or(config.routine.obstacle_threshold_cm),
+                .unwrap_or_else(|| config.routine.obstacle_threshold_cm),
             cliff_threshold_normalized: cliff_threshold_normalized
-                .unwrap_or(config.routine.cliff_threshold_normalized),
+                .unwrap_or_else(|| config.routine.cliff_threshold_normalized),
             max_duration: Duration::from_secs(
-                max_duration_s.unwrap_or(config.routine.max_duration_s),
+                max_duration_s.unwrap_or_else(|| config.routine.max_duration_s),
             ),
             loop_interval: Duration::from_millis(config.routine.loop_interval_ms),
             avoidance_backup: Duration::from_millis(config.routine.avoidance_backup_ms),
@@ -269,8 +269,11 @@ mod tests {
         use std::io::Write;
         // Write a complete [routine] section so serde can parse it; only
         // cliff_threshold_normalized is out of range to trigger validation.
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        write!(
+        let mut f = match tempfile::NamedTempFile::new() {
+            Ok(file) => file,
+            Err(e) => panic!("Failed to create temp file: {e}"),
+        };
+        let _ = write!(
             f,
             "[routine]\n\
              explore_speed_pct = 30.0\n\
@@ -280,9 +283,10 @@ mod tests {
              avoidance_backup_ms = 500\n\
              avoidance_turn_angle_deg = 60.0\n\
              max_duration_s = 300\n"
-        )
-        .unwrap();
-        let err = crate::config::Config::load(f.path()).unwrap_err();
+        );
+        // Removed duplicate [routine] section write
+        let err = crate::config::Config::load(f.path())
+            .expect_err("Expected error for out-of-range cliff threshold");
         assert!(
             err.to_string().contains("cliff_threshold_normalized"),
             "expected error to mention field, got: {err}"
