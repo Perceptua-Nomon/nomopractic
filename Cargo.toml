@@ -5,6 +5,7 @@ edition = "2024"
 description = "Low-latency HAT hardware daemon for the nomon fleet"
 license = "MIT"
 repository = "https://github.com/Perceptua/nomopractic"
+include = ["src/**", "Cargo.toml", "README.md", "config.toml", "LICENSE"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
