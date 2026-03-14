@@ -204,11 +204,18 @@ if [[ "$ON_REMOTE" == true ]]; then
     # Copy the verified binary to the Pi and run the install+restart there.
     REMOTE_TMP="/tmp/nomopractic.$$"
     _rscp "$BINARY_FILE" "${PI_HOST}:${REMOTE_TMP}"
+    # If a local config.toml exists, upload it to the Pi for installation
+    REMOTE_CONFIG_TMP=""
+    if [[ -f "config.toml" ]]; then
+        REMOTE_CONFIG_TMP="/tmp/nomopractic_config.$$"
+        _rscp "config.toml" "${PI_HOST}:${REMOTE_CONFIG_TMP}"
+    fi
     _rsh bash <<REMOTE
 set -euo pipefail
 INSTALL_PATH="${INSTALL_PATH}"
 SERVICE="${SERVICE}"
 REMOTE_TMP="${REMOTE_TMP}"
+REMOTE_CONFIG_TMP="${REMOTE_CONFIG_TMP}"
 
 if [[ -f "\${INSTALL_PATH}" ]]; then
     sudo cp "\${INSTALL_PATH}" "\${INSTALL_PATH}.bak"
@@ -221,6 +228,19 @@ sudo chmod 755 "\${tmp}"
 sudo mv -f "\${tmp}" "\${INSTALL_PATH}"
 rm -f "\${REMOTE_TMP}"
 echo "==> Installed to \${INSTALL_PATH}"
+
+# If a config was uploaded, atomically install it to /etc/nomopractic
+if [[ -n "\${REMOTE_CONFIG_TMP}" ]]; then
+    echo "==> Installing config to /etc/nomopractic/config.toml..."
+    sudo mkdir -p /etc/nomopractic
+    if [[ -f /etc/nomopractic/config.toml ]]; then
+        sudo cp /etc/nomopractic/config.toml /etc/nomopractic/config.toml.bak
+        echo "==> Previous config saved to /etc/nomopractic/config.toml.bak"
+    fi
+    sudo mv -f "\${REMOTE_CONFIG_TMP}" /etc/nomopractic/config.toml
+    sudo chmod 644 /etc/nomopractic/config.toml
+    echo "==> Installed config to /etc/nomopractic/config.toml"
+fi
 
 echo "==> Restarting \${SERVICE}.service..."
 sudo systemctl daemon-reload
@@ -244,6 +264,19 @@ REMOTE
 else
     # Local install (running on the Pi directly).
     install_binary "$BINARY_FILE"
+
+    # If a local config.toml exists, install it to /etc/nomopractic
+    if [[ -f "config.toml" ]]; then
+        echo "==> Installing local config to /etc/nomopractic/config.toml..."
+        sudo mkdir -p /etc/nomopractic
+        if [[ -f /etc/nomopractic/config.toml ]]; then
+            sudo cp /etc/nomopractic/config.toml /etc/nomopractic/config.toml.bak
+            echo "==> Previous config saved to /etc/nomopractic/config.toml.bak"
+        fi
+        sudo cp config.toml /etc/nomopractic/config.toml
+        sudo chmod 644 /etc/nomopractic/config.toml
+        echo "==> Installed config to /etc/nomopractic/config.toml"
+    fi
 
     echo "==> Restarting ${SERVICE}.service..."
     sudo systemctl daemon-reload

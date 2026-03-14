@@ -68,7 +68,7 @@ calibration_path = "/etc/nomopractic/calibration.toml"
 [audio]
 output_card_index = 1             # ALSA card index for HifiBerry DAC output
 output_control    = "PCM"         # ALSA sset control name for output volume
-input_card_index  = 2             # ALSA card index for USB mic (PCM2902)
+input_card_index  = 1             # ALSA card index for USB mic (PCM2902)
 input_control     = "Mic"         # ALSA sset control name for capture gain
 
 # ─── Routine Engine ──────────────────────────────────────────────────────────

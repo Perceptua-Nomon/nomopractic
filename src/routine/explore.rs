@@ -175,7 +175,13 @@ async fn avoidance_manoeuvre(
     stop_motors_and_revoke(hat, config, motor_lease_manager).await;
 
     // 2. Steer away from the obstacle.
-    steer_channel(hat, config, calibration, 90.0 + params.avoidance_turn_angle_deg).await;
+    steer_channel(
+        hat,
+        config,
+        calibration,
+        90.0 + params.avoidance_turn_angle_deg,
+    )
+    .await;
 
     // 3. Drive forward in an arc, polling the sensors every loop_interval.
     //    Exit as soon as the path is clear; fall back to avoidance_backup as a

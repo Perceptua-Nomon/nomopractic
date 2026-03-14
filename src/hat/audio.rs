@@ -53,6 +53,30 @@ pub struct AmixerControl {
 }
 
 impl AmixerControl {
+    /// List the simple-mixer control names available on `card_index`.
+    ///
+    /// Runs `amixer -c N scontrols` and returns the raw output trimmed to a
+    /// single line summary.  Used to enrich error messages when a configured
+    /// control name is not found, so the caller can immediately see what names
+    /// are valid on their hardware.
+    fn available_controls(card_index: u8) -> String {
+        match Command::new("amixer")
+            .args(["-c", &card_index.to_string(), "scontrols"])
+            .output()
+        {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let names: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+                if names.is_empty() {
+                    format!("(no controls found on card {card_index})")
+                } else {
+                    names.join(", ")
+                }
+            }
+            Err(e) => format!("(could not list controls: {e})"),
+        }
+    }
+
     /// Parse the current percentage from `amixer get` output.
     ///
     /// Looks for the first `[N%]` token in the output — produced by lines
@@ -87,9 +111,12 @@ impl AlsaControl for AmixerControl {
             ])
             .output()?;
         if !out.status.success() {
-            return Err(AudioError::Command(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.output_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.output_card_index
+            )));
         }
         Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
     }
@@ -106,9 +133,12 @@ impl AlsaControl for AmixerControl {
             ])
             .output()?;
         if !out.status.success() {
-            return Err(AudioError::Command(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.output_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.output_card_index
+            )));
         }
         Ok(())
     }
@@ -123,9 +153,12 @@ impl AlsaControl for AmixerControl {
             ])
             .output()?;
         if !out.status.success() {
-            return Err(AudioError::Command(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.input_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.input_card_index
+            )));
         }
         Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
     }
@@ -142,9 +175,12 @@ impl AlsaControl for AmixerControl {
             ])
             .output()?;
         if !out.status.success() {
-            return Err(AudioError::Command(
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            ));
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.input_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.input_card_index
+            )));
         }
         Ok(())
     }
