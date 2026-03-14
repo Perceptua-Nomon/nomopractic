@@ -15,6 +15,8 @@ use crate::calibration::CalibrationStore;
 use crate::config::Config;
 use crate::hat::gpio::HatGpio;
 use crate::hat::i2c::Hat;
+use crate::hat::motor;
+use crate::hat::servo::LeaseManager;
 
 /// Pseudo-connection ID for routine-owned motor leases (never a real client ID).
 pub const ROUTINE_CONN_ID: u64 = 0;
@@ -67,6 +69,7 @@ pub struct RoutineEngine {
     gpio: Arc<HatGpio>,
     config: Arc<Config>,
     calibration: Arc<Mutex<CalibrationStore>>,
+    motor_lease_manager: Arc<LeaseManager>,
     active: Option<ActiveRoutine>,
 }
 
@@ -77,12 +80,14 @@ impl RoutineEngine {
         gpio: Arc<HatGpio>,
         config: Arc<Config>,
         calibration: Arc<Mutex<CalibrationStore>>,
+        motor_lease_manager: Arc<LeaseManager>,
     ) -> Self {
         Self {
             hat,
             gpio,
             config,
             calibration,
+            motor_lease_manager,
             active: None,
         }
     }
@@ -119,6 +124,7 @@ impl RoutineEngine {
         let gpio = self.gpio.clone();
         let config = self.config.clone();
         let calibration = self.calibration.clone();
+        let motor_lease_manager = self.motor_lease_manager.clone();
 
         let params = crate::routine::explore::ExploreParams {
             speed_pct: speed_pct.unwrap_or(config.routine.explore_speed_pct),
@@ -140,6 +146,7 @@ impl RoutineEngine {
                 gpio,
                 config,
                 calibration,
+                motor_lease_manager,
                 params,
                 stop_flag_clone,
             )
@@ -147,7 +154,7 @@ impl RoutineEngine {
         });
 
         let started_at = Instant::now();
-        let started_at_uptime_s = std::time::SystemTime::now()
+        let started_at_unix_s = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
@@ -159,24 +166,55 @@ impl RoutineEngine {
             handle,
         });
 
-        Ok(started_at_uptime_s)
+        Ok(started_at_unix_s)
+    }
+
+    /// Extract the active routine for stopping outside the engine lock.
+    ///
+    /// Returns `None` if no routine is running.  The caller is responsible for
+    /// signalling `stop_flag`, waiting for the handle, and idling motors on
+    /// timeout/abort.
+    pub fn take_active(
+        &mut self,
+    ) -> Option<(String, Instant, Arc<AtomicBool>, JoinHandle<(RoutineStats, String)>)> {
+        self.active
+            .take()
+            .map(|a| (a.name, a.started_at, a.stop_flag, a.handle))
     }
 
     /// Stop the active routine and wait for it to finish (up to 2 s).
     ///
-    /// Returns `"INVALID_PARAMS"` if no routine is running.
+    /// On timeout the task is aborted and motors are idled as a safety
+    /// backstop.  Returns `"INVALID_PARAMS"` if no routine is running.
     pub async fn stop(&mut self) -> Result<RoutineStopResult, &'static str> {
-        let active = self.active.take().ok_or("INVALID_PARAMS")?;
-        active.stop_flag.store(true, Ordering::Relaxed);
-
-        let ran_for_s = active.started_at.elapsed().as_secs();
-        let name = active.name.clone();
+        let (name, started_at, stop_flag, mut handle) =
+            self.take_active().ok_or("INVALID_PARAMS")?;
+        stop_flag.store(true, Ordering::Relaxed);
+        let ran_for_s = started_at.elapsed().as_secs();
 
         let (stats, stop_reason) =
-            match tokio::time::timeout(Duration::from_secs(2), active.handle).await {
+            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => (RoutineStats::default(), "error".to_string()),
-                Err(_) => (RoutineStats::default(), "error".to_string()),
+                Err(_timeout) => {
+                    // Timeout — abort the task so it cannot keep running.
+                    handle.abort();
+                    let _ = handle.await;
+                    // Best-effort motor idle as safety backstop.
+                    for cfg in &self.config.motors {
+                        if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                            tracing::warn!(
+                                error = %e,
+                                pwm_channel = cfg.pwm_channel,
+                                "routine stop: SAFETY: failed to idle motor after task abort"
+                            );
+                        }
+                    }
+                    self.motor_lease_manager
+                        .release_connection(ROUTINE_CONN_ID)
+                        .await;
+                    (RoutineStats::default(), "timeout_abort".to_string())
+                }
             };
 
         Ok(RoutineStopResult {
@@ -225,13 +263,27 @@ mod tests {
     }
 
     #[test]
-    fn explore_params_cliff_threshold_clamped() {
-        // cliff_threshold_normalized must be in 0.0..=1.0 per config validation.
-        let low: f64 = 0.0;
-        let high: f64 = 1.0;
-        let mid: f64 = 0.7;
-        assert!((0.0..=1.0).contains(&low));
-        assert!((0.0..=1.0).contains(&high));
-        assert!((0.0..=1.0).contains(&mid));
+    fn config_with_cliff_threshold_out_of_range_is_rejected() {
+        use std::io::Write;
+        // Write a complete [routine] section so serde can parse it; only
+        // cliff_threshold_normalized is out of range to trigger validation.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "[routine]\n\
+             explore_speed_pct = 30.0\n\
+             obstacle_threshold_cm = 25.0\n\
+             cliff_threshold_normalized = 1.5\n\
+             loop_interval_ms = 100\n\
+             avoidance_backup_ms = 500\n\
+             avoidance_turn_angle_deg = 60.0\n\
+             max_duration_s = 300\n"
+        )
+        .unwrap();
+        let err = crate::config::Config::load(f.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("cliff_threshold_normalized"),
+            "expected error to mention field, got: {err}"
+        );
     }
 }

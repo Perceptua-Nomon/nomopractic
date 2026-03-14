@@ -95,10 +95,6 @@ pub struct AudioConfig {
     pub input_card_index: u8,
     /// ALSA mixer control name for microphone capture gain (default: "Mic Capture").
     pub input_control: String,
-    /// Default output volume on first use (0–100, default: 80).
-    pub default_volume_pct: u8,
-    /// Default microphone input gain on first use (0–100, default: 50).
-    pub default_mic_gain_pct: u8,
 }
 
 impl Default for AudioConfig {
@@ -108,8 +104,6 @@ impl Default for AudioConfig {
             output_control: "Digital".into(),
             input_card_index: 2,
             input_control: "Mic Capture".into(),
-            default_volume_pct: 80,
-            default_mic_gain_pct: 50,
         }
     }
 }

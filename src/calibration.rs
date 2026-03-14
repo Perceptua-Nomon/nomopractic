@@ -197,13 +197,47 @@ impl CalibrationStore {
     /// - pads or truncates the `motors` Vec to `n_motors` entries
     /// - inserts any missing well-known servo keys
     /// - resets any grayscale entry that violates `white_raw < black_raw`
+    /// - resets any motor entry whose `speed_scale` or `deadband_pct` is out of
+    ///   documented range (replaced by defaults with a WARN log)
+    /// - resets any servo entry whose `trim_us` is out of documented range
     fn ensure_compat(mut self, n_motors: usize) -> Self {
         while self.motors.len() < n_motors {
             self.motors.push(MotorCalibration::default());
         }
         self.motors.truncate(n_motors);
+        // Validate motor calibration fields; reset invalid entries.
+        for (i, entry) in self.motors.iter_mut().enumerate() {
+            if !Self::valid_speed_scale(entry.speed_scale) {
+                warn!(
+                    index = i,
+                    speed_scale = entry.speed_scale,
+                    "invalid motor calibration (speed_scale out of 0.5–2.0); resetting to defaults"
+                );
+                *entry = MotorCalibration::default();
+                continue;
+            }
+            if !Self::valid_deadband_pct(entry.deadband_pct) {
+                warn!(
+                    index = i,
+                    deadband_pct = entry.deadband_pct,
+                    "invalid motor calibration (deadband_pct out of 0.0–20.0); resetting to defaults"
+                );
+                *entry = MotorCalibration::default();
+            }
+        }
         for key in ["steering", "camera_pan", "camera_tilt"] {
             self.servos.entry(key.to_string()).or_default();
+        }
+        // Validate servo trim values; reset invalid entries.
+        for (name, entry) in self.servos.iter_mut() {
+            if !Self::valid_trim_us(entry.trim_us) {
+                warn!(
+                    servo = %name,
+                    trim_us = entry.trim_us,
+                    "invalid servo calibration (trim_us out of -500–500); resetting to defaults"
+                );
+                *entry = ServoCalibration::default();
+            }
         }
         // Validate grayscale invariant: white_raw < black_raw.
         for (i, entry) in self.grayscale.iter_mut().enumerate() {
@@ -374,5 +408,55 @@ mod tests {
         // Should fall back to defaults — no panic.
         assert_eq!(store.motors.len(), 2);
         assert_eq!(store.motors[0].speed_scale, 1.0);
+    }
+
+    #[test]
+    fn ensure_compat_resets_out_of_range_speed_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("calibration.toml");
+        // Write a store with an out-of-range speed_scale (simulates manual edit).
+        let toml = r#"
+[[motors]]
+speed_scale = 5.0
+deadband_pct = 0.0
+reversed = false
+
+[[motors]]
+speed_scale = 1.0
+deadband_pct = 0.0
+reversed = false
+
+[grayscale]
+# (defaults)
+
+[servos]
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let store = CalibrationStore::load_or_default(&path, 2);
+        // Motor 0 had out-of-range speed_scale; it must be reset to default.
+        assert_eq!(store.motors[0].speed_scale, 1.0);
+        // Motor 1 was valid; unchanged.
+        assert_eq!(store.motors[1].speed_scale, 1.0);
+    }
+
+    #[test]
+    fn ensure_compat_resets_out_of_range_trim_us() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("calibration.toml");
+        let toml = r#"
+[[motors]]
+speed_scale = 1.0
+deadband_pct = 0.0
+reversed = false
+
+[grayscale]
+
+[servos.steering]
+trim_us = 1000
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let store = CalibrationStore::load_or_default(&path, 1);
+        // trim_us = 1000 is out of range [-500, 500]; must be reset to 0.
+        assert_eq!(store.servos["steering"].trim_us, 0);
     }
 }
