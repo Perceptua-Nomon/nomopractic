@@ -79,6 +79,35 @@ impl Default for SensorChannels {
     }
 }
 
+/// ALSA mixer configuration for audio output (HifiBerry DAC) and input
+/// (USB microphone PCM2902).
+///
+/// Card indices and control names are system-specific; defaults match the
+/// PicarX Robot HAT V4 setup where HifiBerry is card 1 and the USB mic is
+/// card 2.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AudioConfig {
+    /// ALSA card index for the HifiBerry DAC output (default: 1).
+    pub output_card_index: u8,
+    /// ALSA mixer control name for output volume (default: "Digital").
+    pub output_control: String,
+    /// ALSA card index for the USB microphone input (default: 2).
+    pub input_card_index: u8,
+    /// ALSA mixer control name for microphone capture gain (default: "Mic Capture").
+    pub input_control: String,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            output_card_index: 1,
+            output_control: "Digital".into(),
+            input_card_index: 2,
+            input_control: "Mic Capture".into(),
+        }
+    }
+}
+
 /// Ultrasonic distance sensor GPIO pin assignments.
 ///
 /// The HC-SR04-compatible sensor on PicarX uses D2 (BCM 27) for TRIG and
@@ -99,6 +128,39 @@ impl Default for UltrasonicConfig {
             trig_pin_bcm: 27,
             echo_pin_bcm: 22,
             timeout_ms: 20,
+        }
+    }
+}
+
+/// Configuration for autonomous on-robot routines.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RoutineConfig {
+    /// Forward speed percentage for the explore routine (1.0–100.0).
+    pub explore_speed_pct: f64,
+    /// Obstacle detection threshold in centimetres (must be > 0).
+    pub obstacle_threshold_cm: f64,
+    /// Cliff detection threshold as a normalised grayscale value (0.0–1.0).
+    pub cliff_threshold_normalized: f64,
+    /// Delay between sensor-poll iterations in milliseconds (≥ 50).
+    pub loop_interval_ms: u64,
+    /// Duration to reverse during avoidance manoeuvre in milliseconds.
+    pub avoidance_backup_ms: u64,
+    /// Angle added to 90° for the avoidance turn (degrees).
+    pub avoidance_turn_angle_deg: f64,
+    /// Maximum routine runtime before automatic stop (seconds).
+    pub max_duration_s: u64,
+}
+
+impl Default for RoutineConfig {
+    fn default() -> Self {
+        Self {
+            explore_speed_pct: 30.0,
+            obstacle_threshold_cm: 25.0,
+            cliff_threshold_normalized: 0.7,
+            loop_interval_ms: 100,
+            avoidance_backup_ms: 500,
+            avoidance_turn_angle_deg: 60.0,
+            max_duration_s: 300,
         }
     }
 }
@@ -128,6 +190,16 @@ pub struct Config {
     pub ultrasonic: UltrasonicConfig,
     /// BCM GPIO pin for the speaker amplifier enable signal. Default: 20.
     pub speaker_en_pin_bcm: u8,
+    /// ALSA audio mixer configuration (output volume + microphone gain).
+    pub audio: AudioConfig,
+    /// Filesystem path for the calibration TOML file.
+    ///
+    /// Loaded at startup; written by `save_calibration`. Override with the
+    /// `NOMON_HAT_CALIBRATION_PATH` environment variable.
+    pub calibration_path: PathBuf,
+    /// Autonomous routine configuration.
+    #[serde(default)]
+    pub routine: RoutineConfig,
 }
 
 impl Default for Config {
@@ -160,6 +232,9 @@ impl Default for Config {
             sensors: SensorChannels::default(),
             ultrasonic: UltrasonicConfig::default(),
             speaker_en_pin_bcm: 20,
+            audio: AudioConfig::default(),
+            calibration_path: PathBuf::from("/etc/nomopractic/calibration.toml"),
+            routine: RoutineConfig::default(),
         }
     }
 }
@@ -235,6 +310,9 @@ impl Config {
             && let Ok(n) = v.parse()
         {
             self.watchdog_poll_ms = n;
+        }
+        if let Ok(v) = get_env("NOMON_HAT_CALIBRATION_PATH") {
+            self.calibration_path = PathBuf::from(v);
         }
     }
 
@@ -327,6 +405,37 @@ impl Config {
             return Err(ConfigError::Validation {
                 field: "watchdog_poll_ms",
                 reason: "must be > 0".into(),
+            });
+        }
+        // Validate routine configuration.
+        if !(1.0..=100.0).contains(&self.routine.explore_speed_pct) {
+            return Err(ConfigError::Validation {
+                field: "routine.explore_speed_pct",
+                reason: format!(
+                    "{} is out of range 1.0–100.0",
+                    self.routine.explore_speed_pct
+                ),
+            });
+        }
+        if self.routine.obstacle_threshold_cm <= 0.0 {
+            return Err(ConfigError::Validation {
+                field: "routine.obstacle_threshold_cm",
+                reason: "must be > 0.0".into(),
+            });
+        }
+        if !(0.0..=1.0).contains(&self.routine.cliff_threshold_normalized) {
+            return Err(ConfigError::Validation {
+                field: "routine.cliff_threshold_normalized",
+                reason: format!(
+                    "{} is out of range 0.0–1.0",
+                    self.routine.cliff_threshold_normalized
+                ),
+            });
+        }
+        if self.routine.loop_interval_ms < 50 {
+            return Err(ConfigError::Validation {
+                field: "routine.loop_interval_ms",
+                reason: format!("{} is below minimum 50 ms", self.routine.loop_interval_ms),
             });
         }
         Ok(())
@@ -579,5 +688,56 @@ steering = 5
         let err = Config::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("dir_pin_bcm"));
         assert!(err.to_string().contains("duplicated"));
+    }
+
+    /// Helper: write a complete `[routine]` TOML section with one field overridden.
+    fn routine_toml(override_key: &str, override_val: &str) -> String {
+        let defaults = [
+            ("explore_speed_pct", "30.0"),
+            ("obstacle_threshold_cm", "25.0"),
+            ("cliff_threshold_normalized", "0.7"),
+            ("loop_interval_ms", "100"),
+            ("avoidance_backup_ms", "500"),
+            ("avoidance_turn_angle_deg", "60.0"),
+            ("max_duration_s", "300"),
+        ];
+        let mut lines = String::from("[routine]\n");
+        for (k, v) in &defaults {
+            let val = if *k == override_key { override_val } else { v };
+            lines.push_str(&format!("{k} = {val}\n"));
+        }
+        lines
+    }
+
+    #[test]
+    fn routine_config_rejects_speed_pct_zero() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", routine_toml("explore_speed_pct", "0.0")).unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("explore_speed_pct"));
+    }
+
+    #[test]
+    fn routine_config_rejects_speed_pct_over_100() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", routine_toml("explore_speed_pct", "101.0")).unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("explore_speed_pct"));
+    }
+
+    #[test]
+    fn routine_config_rejects_cliff_threshold_negative() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", routine_toml("cliff_threshold_normalized", "-0.1")).unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("cliff_threshold_normalized"));
+    }
+
+    #[test]
+    fn routine_config_rejects_loop_interval_ms_too_low() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", routine_toml("loop_interval_ms", "49")).unwrap();
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(err.to_string().contains("loop_interval_ms"));
     }
 }

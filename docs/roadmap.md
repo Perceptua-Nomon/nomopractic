@@ -356,6 +356,10 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 6 | DC Motor Control | ✅ Complete | 112 |
 | 7 | Vehicle Convenience Methods | ✅ Complete | 138 |
 | 8 | Peripheral Expansion | ✅ Complete | 149 |
+| 9 | Audio Levels Control | ✅ Complete | 168 |
+| 10 | Calibration & Configuration | ✅ Complete | 206 |
+| 11 | Routine Engine | ✅ Complete | 222 |
+| 12 | Line-Following Routine | 🔲 Planned | — |
 
 ---
 
@@ -423,7 +427,7 @@ confirm checks pass before tagging.
 
 ---
 
-## Upcoming
+## Completed
 
 ### Phase 9 — Audio Levels Control (P1)
 
@@ -431,20 +435,213 @@ confirm checks pass before tagging.
 input gain (USB microphone PCM2902) via new IPC methods, allowing the nomothetic
 API to manage audio input and output levels without restarting the daemon.
 
-**Candidate deliverables:**
-
 **Output Volume (HifiBerry DAC — ALSA card 1):**
-- [ ] Investigate ALSA mixer control for the HifiBerry DAC (likely `"Digital"` or `"PCM"` control)
-- [ ] `set_volume { volume_pct: u8 }` IPC method (0–100 maps to ALSA dB range)
-- [ ] `get_volume {}` IPC method returning `{ volume_pct: u8 }`
-- [ ] Config: default output volume level in `[audio]` section of `config.toml`
+- [x] `hat/audio.rs`: `AlsaControl` trait + `AmixerControl` implementation using `std::process::Command` to invoke `amixer`
+- [x] `set_volume { volume_pct: u8 }` IPC method (0–100)
+- [x] `get_volume {}` IPC method returning `{ volume_pct: u8 }`
+- [x] Config: `[audio]` section in `config.toml` with `output_card_index`, `output_control`, `default_volume_pct`
 
 **Input Gain (USB Microphone PCM2902 — ALSA card 2):**
-- [ ] Investigate ALSA mixer controls for PCM2902 capture (likely `"Mic"`, `"Mic Capture"`, or `"Capture"` control)
-- [ ] `set_mic_gain { gain_pct: u8 }` IPC method (0–100 maps to both mic gain and AGC dB range)
-- [ ] `get_mic_gain {}` IPC method returning `{ gain_pct: u8 }`
-- [ ] Config: default microphone input gain in `[audio]` section of `config.toml`
+- [x] `set_mic_gain { gain_pct: u8 }` IPC method (0–100)
+- [x] `get_mic_gain {}` IPC method returning `{ gain_pct: u8 }`
+- [x] Config: `input_card_index`, `input_control`, `default_mic_gain_pct` in `[audio]` section
 
 **Testing & Integration:**
-- [ ] Unit tests for all four IPC methods (mocked ALSA)
-- [ ] Phase 9 exit: both output volume and input gain settable via IPC; daemon does not need a restart
+- [x] Unit tests for all four IPC methods (MockAlsaControl — no real hardware)
+- [x] `cargo test` — 142 lib + 26 integration tests passing
+- [x] `cargo clippy -- -D warnings` clean
+- [x] Phase 9 exit: both output volume and input gain settable via IPC without daemon restart
+
+---
+
+### Phase 10 — Calibration & Configuration (P1)
+
+**Goal**: Allow all motors, servos, and sensors to be adjusted and calibrated at
+runtime via IPC, and persisted to a dedicated `calibration.toml` file. Ensures
+the robot behaves correctly before autonomous routines are engaged.
+
+**Architecture**: A `CalibrationStore` holds live-mutable calibration values
+separate from the static `Config`. The store is loaded from `calibration.toml`
+at startup (falling back to defaults if absent) and written back on
+`save_calibration`. Changes take effect immediately; no daemon restart required.
+
+#### 10.0 — CalibrationStore (`src/calibration.rs`)
+- [x] `MotorCalibration { speed_scale: f64, deadband_pct: f64, reversed: bool }` per motor channel
+  - `speed_scale`: multiplier on `speed_pct` before PWM write (range 0.5–2.0, default 1.0)
+  - `deadband_pct`: minimum duty % below which motor does not spin (range 0.0–20.0, default 0.0)
+  - `reversed`: runtime-adjustable direction flip (independent of `MotorConfig.reversed`)
+- [x] `GrayscaleCalibration { white_raw: u16, black_raw: u16 }` per sensor position
+  - 3-element fixed array aligned to `config.sensors.grayscale` positions [left=0, center=1, right=2]
+  - Defaults: `white_raw = 100`, `black_raw = 3000`; validated `white_raw < black_raw`
+- [x] `ServoCalibration { trim_us: i16 }` per logical servo name
+  - `trim_us`: added to computed `pulse_us` before 500–2500 clamping (range −500–+500, default 0)
+- [x] `CalibrationStore { motors: Vec<MotorCalibration>, grayscale: [GrayscaleCalibration; 3], servos: HashMap<String, ServoCalibration> }`
+- [x] Held in `Handler` behind `Arc<tokio::sync::Mutex<CalibrationStore>>`
+- [x] `CalibrationStore::load_or_default(path)`: loads from TOML file; file absence is not an error
+- [x] Validation: `speed_scale` ∈ 0.5–2.0; `deadband_pct` ∈ 0.0–20.0; `|trim_us|` ≤ 500; `white_raw < black_raw`
+- [x] `config.rs`: `calibration_path: PathBuf` (default `"/etc/nomopractic/calibration.toml"`; env var `NOMON_HAT_CALIBRATION_PATH`)
+- [x] `config.toml` updated with `calibration_path` entry
+
+#### 10.1 — Apply Calibration to Hardware Paths
+- [x] `ipc/handler.rs`: apply `MotorCalibration` in `set_motor_speed` and `drive` dispatch:
+  - `effective_speed_pct = clamp(speed_pct × speed_scale, −100.0, 100.0)`
+  - If `|effective_speed_pct| < deadband_pct`, set to 0 (motor stays stopped)
+  - Apply `calibration.reversed XOR config.reversed` for final direction
+- [x] `ipc/handler.rs`: apply `ServoCalibration.trim_us` in `steer`, `pan_camera`, `tilt_camera`:
+  - `effective_pulse_us = clamp(computed_pulse_us + trim_us, 500, 2500)`
+- [x] Calibration `Mutex` guard acquired, value copied, guard dropped before any hardware `.await` (no deadlocks)
+
+#### 10.2 — Normalised Grayscale
+- [x] `read_grayscale_normalized {}` IPC method:
+  - Reads raw ADC values (reuses `read_grayscale` hardware path via `config.sensors.grayscale`)
+  - Per-channel: `normalized = clamp((raw − white_raw) / (black_raw − white_raw), 0.0, 1.0)`
+  - Returns `{ channels: [u8; 3], normalized: [f64; 3] }` (0.0 = white/reflective, 1.0 = black/non-reflective)
+  - `channels` mirrors `read_grayscale` — the ADC channel numbers from `config.sensors.grayscale`
+- [x] Note for Phase 11: `RoutineConfig` will gain `cliff_threshold_normalized: f64` (default 0.7); explore routine uses normalised threshold when calibration is present
+
+#### 10.3 — Calibration IPC Methods
+- [x] `get_calibration {}` → full snapshot:
+  - `motors: [{ channel, speed_scale, deadband_pct, reversed }, ...]` — indexed 0…N-1 matching `config.motors`
+  - `servos: { "steering": { trim_us }, "camera_pan": { trim_us }, "camera_tilt": { trim_us } }`
+  - `grayscale: [{ adc_channel, white_raw, black_raw }, ...]` — 3 elements; `adc_channel` taken from `config.sensors.grayscale[i]`
+- [x] `set_motor_calibration { channel, speed_scale?, deadband_pct?, reversed? }` → `{ channel, speed_scale, deadband_pct, reversed }`
+  - Partial updates: unspecified fields unchanged
+  - `INVALID_PARAMS` if `channel` ≥ `config.motors.len()`
+- [x] `set_servo_calibration { servo, trim_us }` → `{ servo, trim_us }`
+  - `servo` must be `"steering"`, `"camera_pan"`, or `"camera_tilt"`; `INVALID_PARAMS` otherwise
+  - Calibration stored regardless of whether that servo is currently enabled (`None`) in config
+- [x] `calibrate_grayscale { channel, surface }` → `{ channel, adc_channel, surface, raw_value, stored: bool }`
+  - `channel`: sensor position index (0 = left, 1 = center, 2 = right); **not** the ADC bus channel
+  - Actual ADC read uses `config.sensors.grayscale[channel]` for the bus channel
+  - `surface`: `"white"` or `"black"`; reads live ADC and stores as `white_raw` or `black_raw`
+  - Returns `INVALID_PARAMS` if the resulting `white_raw ≥ black_raw` would violate the constraint
+  - `stored` is `false` (and error is returned) when the constraint would be violated
+- [x] `save_calibration {}` → `{ saved: true, path: "/etc/nomopractic/calibration.toml" }` — writes current store to `calibration_path`
+- [x] `reset_calibration {}` → `{ reset: true }` — reverts in-memory store to defaults (file not overwritten until next `save_calibration`)
+- [x] All 7 new methods added to `nomothetic/docs/hat_ipc_schema.md` (authoritative IPC contract)
+
+#### 10.4 — Tests
+- [x] `src/calibration.rs`: default values, `load_or_default` round-trip (write TOML → reload → compare),
+  validation errors (`speed_scale` out of range, `white_raw ≥ black_raw`),
+  partial motor update, reset to defaults (~8 tests)
+- [x] `ipc/handler.rs`: `get_calibration` defaults; `set_motor_calibration` partial update (speed_scale only);
+  `set_motor_calibration` invalid channel; `set_servo_calibration` valid; `set_servo_calibration` invalid name;
+  `calibrate_grayscale` white capture; `calibrate_grayscale` black capture; `calibrate_grayscale` constraint violation;
+  `save_calibration`; `reset_calibration`; `read_grayscale_normalized` with defaults;
+  `read_grayscale_normalized` with custom calibration (~12 tests)
+
+#### 10.5 — Documentation
+- [x] `nomothetic/docs/hat_ipc_schema.md`: add full method specs for all 7 new IPC methods
+  (`get_calibration`, `set_motor_calibration`, `set_servo_calibration`, `calibrate_grayscale`,
+  `read_grayscale_normalized`, `save_calibration`, `reset_calibration`)
+- [x] `nomopractic/docs/architecture.md` Methods Summary table: add Phase 9 audio level methods
+  and all Phase 10 calibration and normalised grayscale methods
+- [x] `nomothetic/docs/architecture.md` endpoints table: add Phase 9 audio level endpoints
+  and all Phase 10 calibration + `GET /api/sensor/grayscale/normalized` endpoints
+
+#### Phase 10 Exit Criteria
+- [x] Motor calibration (speed_scale, deadband, direction) applied transparently to all motor commands
+- [x] Servo trim applied transparently to all named servo commands
+- [x] `read_grayscale_normalized` returns 0.0–1.0 values based on captured surface references
+- [x] Calibration persisted to and reloaded from `calibration.toml` across daemon restarts
+- [x] All tests pass without hardware
+- [x] `cargo test` — 206 tests passing (171 lib + 35 integration)
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+
+---
+
+## Upcoming
+
+### Phase 11 — Routine Engine (P1)
+
+**Goal**: Run self-contained hardware-loop routines entirely within the daemon.
+Routines survive IPC client disconnects — they are started, stopped, and queried
+via three new IPC methods. The first routine is `explore`: drive forward, avoid
+obstacles with the ultrasonic sensor, and avoid cliffs with the grayscale sensors.
+
+**Architecture decision:** Routines live in nomopractic (Rust) rather than
+nomothetic (Python) so the sensor-actuator loop runs with zero network
+round-trips per iteration and continues operating even when the REST API client
+is not connected. The normal TTL watchdog safety model is preserved: the routine
+task continuously refreshes motor leases; if the task panics or is stopped, the
+watchdog idles all motors within `ttl_ms` milliseconds.
+
+#### 11.0 — RoutineConfig
+- [x] `config.rs`: `RoutineConfig { explore_speed_pct: f64, obstacle_threshold_cm: f64, cliff_threshold_normalized: f64, loop_interval_ms: u64, avoidance_backup_ms: u64, avoidance_turn_angle_deg: f64 }`
+  - Defaults: speed `30.0`, obstacle `25.0 cm`, cliff_normalized `0.7` (0.0 = white/reflective, 1.0 = black/non-reflective), loop `100 ms`, backup `500 ms`, turn `60°`
+- [x] `[routine]` TOML section added to `config.toml`
+- [x] Validation: speed in 1.0–100.0, `obstacle_threshold_cm > 0`, `cliff_threshold_normalized` ∈ 0.0–1.0, `loop_interval_ms ≥ 50`
+
+#### 11.1 — Routine Module (`routine/`)
+- [x] `src/routine/mod.rs`: `RoutineEngine`, `RoutineState` enum (`Idle | Running | Stopping`), `RoutineStats { obstacles_avoided, cliffs_avoided }`
+- [x] `RoutineEngine` holds `Arc<Hat>`, `Arc<HatGpio>`, `Arc<Config>`, `Arc<tokio::sync::Mutex<CalibrationStore>>`, `Arc<LeaseManager>` (motor leases)
+  - `CalibrationStore` ref needed so `explore_task` can apply normalised cliff detection using live calibration
+- [x] Stop signal: `Arc<std::sync::atomic::AtomicBool>` (no new dependencies)
+- [x] `ROUTINE_CONN_ID: u64 = 0` constant — pseudo-connection ID for routine-owned motor leases
+- [x] `start(name, params) -> Result<(), RoutineError>`: spawns `tokio::spawn` task; returns `ALREADY_RUNNING` if occupied
+- [x] `stop() -> Option<RoutineStats>`: sets stop flag, awaits `JoinHandle` (with 2 s timeout), stops all motors
+- [x] `status() -> RoutineStatusSnapshot`: `{ running, name, elapsed_s, stats }`
+
+#### 11.2 — Explore Routine (`routine/explore.rs`)
+- [x] `explore_task(hat, gpio, motor_lease_manager, config, params, stats, stop_flag)` async fn
+- [x] Loop at `loop_interval_ms` (default 100 ms):
+  1. Check stop flag and `max_duration_s` — exit if either triggered
+  2. Read ultrasonic distance (`read_distance_cm`)
+  3. Read normalised grayscale: compute `(raw − white_raw) / (black_raw − white_raw)` per channel using live `CalibrationStore` values (0.0 = white/reflective, 1.0 = black/non-reflective)
+  4. **Cliff detected** (`any normalized_value ≥ cliff_threshold_normalized`): stop motors → reverse `avoidance_backup_ms` → steer away from the most-dark channel → resume straight; increment `cliffs_avoided`
+  5. **Obstacle detected** (`distance ≤ obstacle_threshold_cm` or ultrasonic timeout): stop motors → reverse `avoidance_backup_ms` → steer `avoidance_turn_angle_deg` right → resume straight; increment `obstacles_avoided`
+  6. **Clear**: `drive(speed_pct, ttl_ms=2000)` + `steer(90°, ttl_ms=2000)`
+- [x] On task exit (any reason): call `stop_all_motors` + clear motor leases
+- [x] Ultrasonic read errors treated as obstacle (fail-safe)
+
+#### 11.3 — IPC Methods
+- [x] `start_routine { name, speed_pct?, obstacle_threshold_cm?, cliff_threshold_normalized?, max_duration_s? }` → `{ name, started_at_uptime_s }`
+  - `name` must be a known routine name (`"explore"`); `INVALID_PARAMS` otherwise
+  - `ALREADY_RUNNING` error code returned if a routine is active
+  - Per-call params override config defaults (not persisted)
+- [x] `stop_routine {}` → `{ name, ran_for_s, obstacles_avoided, cliffs_avoided, stop_reason: "commanded" | "timeout" | "error" }`
+  - `INVALID_PARAMS` if no routine is running
+- [x] `get_routine_status {}` → `{ running: bool, name: string | null, elapsed_s: integer | null, obstacles_avoided: integer | null, cliffs_avoided: integer | null }`
+- [x] All three wired up in `ipc/handler.rs`; `RoutineEngine` held in `Handler` behind `Arc<tokio::sync::Mutex<RoutineEngine>>`
+- [x] New error code `ALREADY_RUNNING` added to IPC schema error code table
+
+#### 11.4 — Safety
+- [x] `max_duration_s` param (default: 300 s) auto-stops the routine after the time limit; `stop_reason: "timeout"`
+- [x] Task panic — if `JoinHandle` returns `Err`, `stop()` logs `error!` and still stops all motors; `stop_reason: "error"`
+- [x] Mutex guard over `RoutineEngine` is dropped before every `await` in the handler (no deadlocks)
+- [x] Routine cannot starve the IPC handler — it runs on a separate Tokio task
+
+#### 11.5 — Tests
+- [x] `routine/mod.rs`: unit tests — start (idle→running), double-start rejected, stop (running→idle), status (idle), status (running)
+- [x] `routine/explore.rs`: unit tests with mocked sensor reads — obstacle→reverse→turn sequence, cliff→reverse sequence, clear→drive-straight, max_duration exit
+- [x] `ipc/handler.rs`: unit tests — `start_routine` success, `start_routine` unknown name, `start_routine` ALREADY_RUNNING, `stop_routine` success, `stop_routine` not-running, `get_routine_status` idle, `get_routine_status` running
+
+#### Phase 11 Exit Criteria
+- [x] `start_routine { "name": "explore" }` navigates autonomously until stopped
+- [x] `stop_routine` arrests all motors and returns telemetry stats
+- [x] Routine continues through IPC client disconnect; motors stop on explicit `stop_routine` or timeout
+- [x] All tests pass without hardware
+- [x] `cargo test` — 222 tests passing (184 unit + 38 integration)
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+
+---
+
+### Phase 12 — Line-Following Routine (P2)
+
+**Goal**: Add a `follow_line` routine using the grayscale sensors and a
+proportional-derivative (PD) steering controller.
+
+- [ ] `routine/follow_line.rs`: PD control loop
+  - Error signal: weighted sum of grayscale channel values (left/centre/right)
+  - Steer angle: `90° + clamp(Kp × error + Kd × d_error, −45°, +45°)`
+  - Line-lost detection: stop after N consecutive cycles with no dark reading across all channels
+- [ ] `start_routine { name: "follow_line", speed_pct?, kp?, kd?, line_lost_cycles? }` (extended params)
+- [ ] `lines_followed` counter in `RoutineStats`
+- [ ] Unit tests for PD calculation and line-lost logic
+
+#### Phase 12 Exit Criteria
+- [ ] Robot follows a dark line on a light surface autonomously
+- [ ] Stops cleanly when line is lost for > `line_lost_cycles` iterations
+- [ ] All tests pass without hardware

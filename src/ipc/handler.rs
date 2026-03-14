@@ -7,8 +7,10 @@ use serde_json::json;
 use tracing::{debug, error, warn};
 
 use super::schema::{Request, Response};
+use crate::calibration::CalibrationStore;
 use crate::config::Config;
 use crate::hat::adc;
+use crate::hat::audio::{AlsaControl, AmixerControl, AudioError};
 use crate::hat::battery;
 use crate::hat::gpio::{self, GpioError, HatGpio};
 use crate::hat::i2c::{Hat, HatError};
@@ -17,6 +19,7 @@ use crate::hat::servo::LeaseManager;
 use crate::hat::ultrasonic;
 use crate::hat::{pwm, servo};
 use crate::reset;
+use crate::routine::RoutineEngine;
 
 /// Minimum interval between consecutive MCU reset requests (ms).
 const RESET_MIN_INTERVAL_MS: u64 = 1000;
@@ -65,21 +68,57 @@ pub struct Handler {
     motor_lease_manager: Arc<LeaseManager>,
     gpio: Arc<HatGpio>,
     mcu_state: tokio::sync::Mutex<McuState>,
+    alsa: Arc<dyn AlsaControl>,
+    calibration: Arc<tokio::sync::Mutex<CalibrationStore>>,
+    routine: Arc<tokio::sync::Mutex<RoutineEngine>>,
 }
 
 impl Handler {
     pub fn new(config: Arc<Config>, hat: Arc<Hat>, gpio: Arc<HatGpio>) -> Self {
+        let alsa: Arc<dyn AlsaControl> = Arc::new(AmixerControl {
+            output_card_index: config.audio.output_card_index,
+            output_control: config.audio.output_control.clone(),
+            input_card_index: config.audio.input_card_index,
+            input_control: config.audio.input_control.clone(),
+        });
+        Self::with_alsa(config, hat, gpio, alsa)
+    }
+
+    /// Like `new` but accepts an explicit `AlsaControl` implementation.
+    ///
+    /// Used by tests to inject a `MockAlsaControl` without touching real ALSA.
+    pub fn with_alsa(
+        config: Arc<Config>,
+        hat: Arc<Hat>,
+        gpio: Arc<HatGpio>,
+        alsa: Arc<dyn AlsaControl>,
+    ) -> Self {
+        let n_motors = config.motors.len();
+        let calibration_store =
+            CalibrationStore::load_or_default(&config.calibration_path, n_motors);
+        let calibration = Arc::new(tokio::sync::Mutex::new(calibration_store));
+        let motor_lease_manager = Arc::new(LeaseManager::new());
+        let routine = Arc::new(tokio::sync::Mutex::new(RoutineEngine::new(
+            hat.clone(),
+            gpio.clone(),
+            config.clone(),
+            calibration.clone(),
+            motor_lease_manager.clone(),
+        )));
         Self {
             config,
             start_time: Instant::now(),
             hat,
             lease_manager: Arc::new(LeaseManager::new()),
-            motor_lease_manager: Arc::new(LeaseManager::new()),
+            motor_lease_manager,
             gpio,
             mcu_state: tokio::sync::Mutex::new(McuState {
                 reset_count: 0,
                 last_reset_at: None,
             }),
+            alsa,
+            calibration,
+            routine,
         }
     }
 
@@ -171,6 +210,22 @@ impl Handler {
             "read_ultrasonic" => self.handle_read_ultrasonic(&request).await,
             "enable_speaker" => self.handle_enable_speaker(&request).await,
             "disable_speaker" => self.handle_disable_speaker(&request).await,
+            "set_volume" => self.handle_set_volume(&request).await,
+            "get_volume" => self.handle_get_volume(&request).await,
+            "set_mic_gain" => self.handle_set_mic_gain(&request).await,
+            "get_mic_gain" => self.handle_get_mic_gain(&request).await,
+            // Calibration methods.
+            "get_calibration" => self.handle_get_calibration(&request).await,
+            "set_motor_calibration" => self.handle_set_motor_calibration(&request).await,
+            "set_servo_calibration" => self.handle_set_servo_calibration(&request).await,
+            "calibrate_grayscale" => self.handle_calibrate_grayscale(&request).await,
+            "read_grayscale_normalized" => self.handle_read_grayscale_normalized(&request).await,
+            "save_calibration" => self.handle_save_calibration(&request).await,
+            "reset_calibration" => self.handle_reset_calibration(&request).await,
+            // Routine methods.
+            "start_routine" => self.handle_start_routine(&request).await,
+            "stop_routine" => self.handle_stop_routine(&request).await,
+            "get_routine_status" => self.handle_get_routine_status(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -320,7 +375,9 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("unknown pin '{pin_name}'; valid: D4, D5, MCURST, SW, LED"),
+                    format!(
+                        "unknown pin '{pin_name}'; valid: D2, D3, D4, D5, MCURST, SW, LED, SPEAKER_EN"
+                    ),
                 );
             }
         };
@@ -347,7 +404,9 @@ impl Handler {
                 return Response::err(
                     request.id.clone(),
                     "INVALID_PARAMS",
-                    format!("unknown pin '{pin_name}'; valid output pins: D4, D5, MCURST, LED"),
+                    format!(
+                        "unknown pin '{pin_name}'; valid output pins: D2, D4, D5, MCURST, LED, SPEAKER_EN"
+                    ),
                 );
             }
         };
@@ -475,14 +534,28 @@ impl Handler {
             Err(resp) => return resp,
         };
 
+        // Apply motor calibration — acquire lock, copy values, drop lock before await.
+        let (effective_speed, final_reversed) = {
+            let cal_guard = self.calibration.lock().await;
+            let cal = &cal_guard.motors[ipc_channel as usize];
+            let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
+            let effective = if scaled.abs() < cal.deadband_pct {
+                0.0
+            } else {
+                scaled
+            };
+            let reversed = cal.reversed ^ self.config.motors[ipc_channel as usize].reversed;
+            (effective, reversed)
+        };
+
         let cfg = &self.config.motors[ipc_channel as usize];
         match motor::set_motor_speed(
             &self.hat,
             &self.gpio,
             cfg.pwm_channel,
             cfg.dir_pin_bcm,
-            cfg.reversed,
-            speed_pct,
+            final_reversed,
+            effective_speed,
         )
         .await
         {
@@ -576,18 +649,38 @@ impl Handler {
             return Response::err(request.id.clone(), "INVALID_PARAMS", "no motors configured");
         }
 
-        // Phase 1: command all motors.  Track which channels succeeded so we
-        // can roll back on partial failure.
+        // Snapshot calibration for all motor channels before any hardware calls.
+        // Guard is acquired once, all values are copied, then guard is dropped.
+        let cal_entries: Vec<(f64, bool)> = {
+            let cal_guard = self.calibration.lock().await;
+            self.config
+                .motors
+                .iter()
+                .enumerate()
+                .map(|(i, cfg)| {
+                    let cal = &cal_guard.motors[i];
+                    let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
+                    let effective = if scaled.abs() < cal.deadband_pct {
+                        0.0
+                    } else {
+                        scaled
+                    };
+                    let reversed = cal.reversed ^ cfg.reversed;
+                    (effective, reversed)
+                })
+                .collect()
+        };
         let mut succeeded: Vec<u8> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for (ipc_ch, cfg) in self.config.motors.iter().enumerate() {
+            let (effective_speed, final_reversed) = cal_entries[ipc_ch];
             match motor::set_motor_speed(
                 &self.hat,
                 &self.gpio,
                 cfg.pwm_channel,
                 cfg.dir_pin_bcm,
-                cfg.reversed,
-                speed_pct,
+                final_reversed,
+                effective_speed,
             )
             .await
             {
@@ -699,8 +792,22 @@ impl Handler {
             Err(resp) => return resp,
         };
 
-        match servo::set_servo_angle(&self.hat, channel, angle_deg).await {
-            Ok(pulse_us) => {
+        // Acquire calibration trim, copy value, drop guard before hardware call.
+        let trim_us: i16 = {
+            let cal_guard = self.calibration.lock().await;
+            cal_guard
+                .servos
+                .get(servo_name)
+                .map(|s| s.trim_us)
+                .unwrap_or(0)
+        };
+
+        // Compute raw pulse from angle, then apply trim with 500–2500 µs clamp.
+        let raw_pulse = servo::angle_to_pulse_us(angle_deg);
+        let effective_pulse = (raw_pulse as i32 + trim_us as i32).clamp(500, 2500) as u16;
+
+        match servo::set_servo_pulse_us(&self.hat, channel, effective_pulse).await {
+            Ok(()) => {
                 self.lease_manager.set_lease(channel, conn_id, ttl_ms).await;
                 Response::ok(
                     request.id.clone(),
@@ -708,7 +815,7 @@ impl Handler {
                         "servo": servo_name,
                         "channel": channel,
                         "angle_deg": angle_deg,
-                        "pulse_us": pulse_us,
+                        "pulse_us": effective_pulse,
                     }),
                 )
             }
@@ -800,6 +907,592 @@ impl Handler {
             Err(e) => Response::err(request.id.clone(), gpio_error_code(&e), e.to_string()),
         }
     }
+
+    /// `set_volume { volume_pct: u8 }` — set output volume via ALSA mixer.
+    async fn handle_set_volume(&self, request: &Request) -> Response {
+        let volume_pct = match request.params.get("volume_pct").and_then(|v| v.as_u64()) {
+            Some(p) if p <= 100 => p as u8,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "volume_pct is required and must be 0–100",
+                );
+            }
+        };
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.set_volume_pct(volume_pct)).await {
+            Ok(Ok(())) => {
+                tracing::info!(volume_pct, "output volume set");
+                Response::ok(request.id.clone(), json!({ "volume_pct": volume_pct }))
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "set_volume failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `get_volume {}` — read current output volume from ALSA mixer.
+    async fn handle_get_volume(&self, request: &Request) -> Response {
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.get_volume_pct()).await {
+            Ok(Ok(pct)) => Response::ok(request.id.clone(), json!({ "volume_pct": pct })),
+            Ok(Err(e)) => {
+                warn!(error = %e, "get_volume failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `set_mic_gain { gain_pct: u8 }` — set microphone capture gain via ALSA.
+    async fn handle_set_mic_gain(&self, request: &Request) -> Response {
+        let gain_pct = match request.params.get("gain_pct").and_then(|v| v.as_u64()) {
+            Some(p) if p <= 100 => p as u8,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "gain_pct is required and must be 0–100",
+                );
+            }
+        };
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.set_mic_gain_pct(gain_pct)).await {
+            Ok(Ok(())) => {
+                tracing::info!(gain_pct, "microphone gain set");
+                Response::ok(request.id.clone(), json!({ "gain_pct": gain_pct }))
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "set_mic_gain failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `get_mic_gain {}` — read current microphone capture gain from ALSA.
+    async fn handle_get_mic_gain(&self, request: &Request) -> Response {
+        let alsa = Arc::clone(&self.alsa);
+        match tokio::task::spawn_blocking(move || alsa.get_mic_gain_pct()).await {
+            Ok(Ok(pct)) => Response::ok(request.id.clone(), json!({ "gain_pct": pct })),
+            Ok(Err(e)) => {
+                warn!(error = %e, "get_mic_gain failed");
+                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Calibration methods
+    // -----------------------------------------------------------------------
+
+    /// `get_calibration {}` — return a full snapshot of the in-memory
+    /// calibration store, merging `adc_channel` from `config.sensors.grayscale`.
+    async fn handle_get_calibration(&self, request: &Request) -> Response {
+        let guard = self.calibration.lock().await;
+        let store = guard.clone();
+        drop(guard);
+
+        let motors: Vec<serde_json::Value> = store
+            .motors
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                json!({
+                    "channel": i,
+                    "speed_scale": m.speed_scale,
+                    "deadband_pct": m.deadband_pct,
+                    "reversed": m.reversed,
+                })
+            })
+            .collect();
+
+        let [adc0, adc1, adc2] = self.config.sensors.grayscale;
+        let grayscale: Vec<serde_json::Value> = store
+            .grayscale
+            .iter()
+            .zip([adc0, adc1, adc2])
+            .map(|(g, adc_ch)| {
+                json!({
+                    "adc_channel": adc_ch,
+                    "white_raw": g.white_raw,
+                    "black_raw": g.black_raw,
+                })
+            })
+            .collect();
+
+        let servos: serde_json::Map<String, serde_json::Value> = store
+            .servos
+            .iter()
+            .map(|(name, s)| (name.clone(), json!({ "trim_us": s.trim_us })))
+            .collect();
+
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "motors": motors,
+                "servos": servos,
+                "grayscale": grayscale,
+            }),
+        )
+    }
+
+    /// `set_motor_calibration { channel, speed_scale?, deadband_pct?, reversed? }` —
+    /// partial update of motor calibration; unspecified fields are unchanged.
+    async fn handle_set_motor_calibration(&self, request: &Request) -> Response {
+        let n_motors = self.config.motors.len();
+        let channel = match request.params.get("channel").and_then(|v| v.as_u64()) {
+            Some(ch) if (ch as usize) < n_motors => ch as usize,
+            Some(ch) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("channel {ch} is not configured; {n_motors} motor(s) available"),
+                );
+            }
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "channel is required");
+            }
+        };
+
+        // Validate optional fields before locking the store.
+        if let Some(v) = request.params.get("speed_scale").and_then(|v| v.as_f64())
+            && !CalibrationStore::valid_speed_scale(v)
+        {
+            return Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                "speed_scale must be in [0.5, 2.0]",
+            );
+        }
+        if let Some(v) = request.params.get("deadband_pct").and_then(|v| v.as_f64())
+            && !CalibrationStore::valid_deadband_pct(v)
+        {
+            return Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                "deadband_pct must be in [0.0, 20.0]",
+            );
+        }
+
+        let mut guard = self.calibration.lock().await;
+        let entry = &mut guard.motors[channel];
+
+        if let Some(v) = request.params.get("speed_scale").and_then(|v| v.as_f64()) {
+            entry.speed_scale = v;
+        }
+        if let Some(v) = request.params.get("deadband_pct").and_then(|v| v.as_f64()) {
+            entry.deadband_pct = v;
+        }
+        if let Some(v) = request.params.get("reversed").and_then(|v| v.as_bool()) {
+            entry.reversed = v;
+        }
+        let updated = entry.clone();
+        drop(guard);
+
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "channel": channel,
+                "speed_scale": updated.speed_scale,
+                "deadband_pct": updated.deadband_pct,
+                "reversed": updated.reversed,
+            }),
+        )
+    }
+
+    /// `set_servo_calibration { servo, trim_us }` — set trim offset for a
+    /// named servo.  Valid servo names: `"steering"`, `"camera_pan"`,
+    /// `"camera_tilt"`.
+    async fn handle_set_servo_calibration(&self, request: &Request) -> Response {
+        let servo_name = match request.params.get("servo").and_then(|v| v.as_str()) {
+            Some(s) if matches!(s, "steering" | "camera_pan" | "camera_tilt") => s.to_owned(),
+            Some(s) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("servo '{s}' not recognised; valid: steering, camera_pan, camera_tilt"),
+                );
+            }
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "servo is required");
+            }
+        };
+        let trim_us = match request.params.get("trim_us").and_then(|v| v.as_i64()) {
+            Some(v) if (-500..=500).contains(&v) => v as i16,
+            Some(_) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "trim_us must be in [-500, 500]",
+                );
+            }
+            None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "trim_us is required and must be an integer",
+                );
+            }
+        };
+
+        let mut guard = self.calibration.lock().await;
+        guard.servos.entry(servo_name.clone()).or_default().trim_us = trim_us;
+        drop(guard);
+
+        Response::ok(
+            request.id.clone(),
+            json!({ "servo": servo_name, "trim_us": trim_us }),
+        )
+    }
+
+    /// `calibrate_grayscale { channel, surface }` — read a live ADC value for
+    /// one sensor position and store it as the white or black surface reference.
+    ///
+    /// `channel` is the **sensor position index** (0–2), not the ADC bus channel.
+    async fn handle_calibrate_grayscale(&self, request: &Request) -> Response {
+        let sensor_idx = match request.params.get("channel").and_then(|v| v.as_u64()) {
+            Some(ch) if ch <= 2 => ch as usize,
+            Some(_) | None => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "channel is required and must be 0–2",
+                );
+            }
+        };
+        let surface = match request.params.get("surface").and_then(|v| v.as_str()) {
+            Some(s) if matches!(s, "white" | "black") => s.to_owned(),
+            Some(s) => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("surface '{s}' not recognised; valid: white, black"),
+                );
+            }
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "surface is required");
+            }
+        };
+
+        let adc_channel = self.config.sensors.grayscale[sensor_idx];
+
+        // Read live ADC value before locking the store.
+        let raw_value = match adc::read_adc(&self.hat, adc_channel).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, adc_channel, "calibrate_grayscale ADC read failed");
+                return Response::err(request.id.clone(), hat_error_code(&e), e.to_string());
+            }
+        };
+
+        // Validate the constraint before storing.
+        let mut guard = self.calibration.lock().await;
+        if surface == "white" {
+            let black_raw = guard.grayscale[sensor_idx].black_raw;
+            if !CalibrationStore::valid_grayscale(raw_value, black_raw) {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!(
+                        "white_raw ({raw_value}) must be < current black_raw ({black_raw}); \
+                         recapture black surface first or adjust surfaces",
+                    ),
+                );
+            }
+            guard.grayscale[sensor_idx].white_raw = raw_value;
+        } else {
+            let white_raw = guard.grayscale[sensor_idx].white_raw;
+            if !CalibrationStore::valid_grayscale(white_raw, raw_value) {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!(
+                        "black_raw ({raw_value}) must be > current white_raw ({white_raw}); \
+                         recapture white surface first or adjust surfaces",
+                    ),
+                );
+            }
+            guard.grayscale[sensor_idx].black_raw = raw_value;
+        }
+
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "channel": sensor_idx,
+                "adc_channel": adc_channel,
+                "surface": surface,
+                "raw_value": raw_value,
+                "stored": true,
+            }),
+        )
+    }
+
+    /// `read_grayscale_normalized {}` — read all three grayscale sensor
+    /// channels and return per-channel values normalised against the captured
+    /// surface calibration.
+    async fn handle_read_grayscale_normalized(&self, request: &Request) -> Response {
+        let [ch0, ch1, ch2] = self.config.sensors.grayscale;
+
+        // Copy calibration before any hardware calls.
+        let cal_gs = {
+            let guard = self.calibration.lock().await;
+            guard.grayscale.clone()
+        };
+
+        let mut raw_values = [0u16; 3];
+        for (i, ch) in [ch0, ch1, ch2].iter().enumerate() {
+            match adc::read_adc(&self.hat, *ch).await {
+                Ok(v) => raw_values[i] = v,
+                Err(e) => {
+                    warn!(error = %e, channel = ch, "read_grayscale_normalized ADC read failed");
+                    return Response::err(
+                        request.id.clone(),
+                        hat_error_code(&e),
+                        format!("grayscale channel {ch}: {e}"),
+                    );
+                }
+            }
+        }
+
+        let normalized: Vec<f64> = raw_values
+            .iter()
+            .zip(cal_gs.iter())
+            .map(|(&raw, gs)| {
+                let white = gs.white_raw as f64;
+                let black = gs.black_raw as f64;
+                ((raw as f64 - white) / (black - white)).clamp(0.0, 1.0)
+            })
+            .collect();
+
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "channels": [ch0, ch1, ch2],
+                "normalized": normalized,
+            }),
+        )
+    }
+
+    /// `save_calibration {}` — persist the current in-memory calibration store
+    /// to disk at `config.calibration_path`.
+    async fn handle_save_calibration(&self, request: &Request) -> Response {
+        let store_snapshot = {
+            let guard = self.calibration.lock().await;
+            guard.clone()
+        };
+        let path = self.config.calibration_path.clone();
+        let path_display = path.display().to_string();
+        match tokio::task::spawn_blocking(move || store_snapshot.save(&path)).await {
+            Ok(Ok(())) => {
+                tracing::info!(path = %path_display, "calibration saved");
+                Response::ok(
+                    request.id.clone(),
+                    json!({
+                        "saved": true,
+                        "path": path_display,
+                    }),
+                )
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, path = %path_display, "save_calibration failed");
+                Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `reset_calibration {}` — replace in-memory store with factory defaults.
+    /// The file on disk is NOT overwritten; call `save_calibration` to persist.
+    async fn handle_reset_calibration(&self, request: &Request) -> Response {
+        let n_motors = self.config.motors.len();
+        let fresh = CalibrationStore::default_for(n_motors);
+        let mut guard = self.calibration.lock().await;
+        *guard = fresh;
+        drop(guard);
+        Response::ok(request.id.clone(), json!({ "reset": true }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Routine methods
+    // -----------------------------------------------------------------------
+
+    /// `start_routine { name, speed_pct?, obstacle_threshold_cm?,
+    ///   cliff_threshold_normalized?, max_duration_s? }` — start a named
+    /// autonomous routine with optional per-run overrides.
+    async fn handle_start_routine(&self, request: &Request) -> Response {
+        let name = match request.params.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n.to_owned(),
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "name is required");
+            }
+        };
+
+        // Optional float overrides — validate if present.
+        let speed_pct = if let Some(s) = request.params.get("speed_pct").and_then(|v| v.as_f64()) {
+            if !(1.0..=100.0).contains(&s) {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("speed_pct {s} is out of range 1.0–100.0"),
+                );
+            }
+            Some(s)
+        } else {
+            None
+        };
+
+        let obstacle_threshold_cm = if let Some(v) = request
+            .params
+            .get("obstacle_threshold_cm")
+            .and_then(|v| v.as_f64())
+        {
+            if v <= 0.0 {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "obstacle_threshold_cm must be > 0.0",
+                );
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let cliff_threshold_normalized = if let Some(v) = request
+            .params
+            .get("cliff_threshold_normalized")
+            .and_then(|v| v.as_f64())
+        {
+            if !(0.0..=1.0).contains(&v) {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("cliff_threshold_normalized {v} is out of range 0.0–1.0"),
+                );
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let max_duration_s = request
+            .params
+            .get("max_duration_s")
+            .and_then(|v| v.as_u64());
+
+        let mut engine = self.routine.lock().await;
+        match engine.start(
+            &name,
+            speed_pct,
+            obstacle_threshold_cm,
+            cliff_threshold_normalized,
+            max_duration_s,
+        ) {
+            Ok(()) => Response::ok(
+                request.id.clone(),
+                json!({ "name": name, "started_at_uptime_s": self.start_time.elapsed().as_secs() }),
+            ),
+            Err("ALREADY_RUNNING") => Response::err(
+                request.id.clone(),
+                "ALREADY_RUNNING",
+                "a routine is already running",
+            ),
+            Err(_) => Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                format!("routine '{}' is not recognised; valid: explore", name),
+            ),
+        }
+    }
+
+    /// `stop_routine {}` — stop the active routine and return final stats.
+    async fn handle_stop_routine(&self, request: &Request) -> Response {
+        // Phase 1: Extract the active routine under the lock, then drop it
+        // so concurrent start/status calls are not blocked during the async wait.
+        let active = {
+            let mut engine = self.routine.lock().await;
+            engine.take_active()
+        };
+
+        let Some((name, started_at, stop_flag, mut handle)) = active else {
+            return Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                "no routine is currently running",
+            );
+        };
+
+        // Phase 2: Signal stop and await the task outside the lock.
+        use std::sync::atomic::Ordering;
+        stop_flag.store(true, Ordering::Relaxed);
+        let ran_for_s = started_at.elapsed().as_secs();
+
+        let (stats, stop_reason) = match tokio::time::timeout(Duration::from_secs(2), &mut handle)
+            .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => (crate::routine::RoutineStats::default(), "error".to_string()),
+            Err(_timeout) => {
+                // Timed out — abort the detached task and idle motors.
+                handle.abort();
+                let _ = handle.await;
+                for cfg in &self.config.motors {
+                    if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                        error!(error = %e, pwm_channel = cfg.pwm_channel, "stop_routine: SAFETY: failed to idle motor after task abort");
+                    }
+                }
+                self.motor_lease_manager
+                    .release_connection(crate::routine::ROUTINE_CONN_ID)
+                    .await;
+                (
+                    crate::routine::RoutineStats::default(),
+                    "timeout_abort".to_string(),
+                )
+            }
+        };
+
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "name": name,
+                "ran_for_s": ran_for_s,
+                "obstacles_avoided": stats.obstacles_avoided,
+                "cliffs_avoided": stats.cliffs_avoided,
+                "stop_reason": stop_reason,
+            }),
+        )
+    }
+
+    /// `get_routine_status {}` — return current routine state without
+    /// affecting it.
+    async fn handle_get_routine_status(&self, request: &Request) -> Response {
+        let engine = self.routine.lock().await;
+        let s = engine.status();
+        drop(engine);
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "running": s.running,
+                "name": s.name,
+                "elapsed_s": s.elapsed_s,
+                "obstacles_avoided": s.obstacles_avoided,
+                "cliffs_avoided": s.cliffs_avoided,
+            }),
+        )
+    }
+}
+
+/// Classify an `AudioError` into an IPC error code string.
+fn alsa_error_code(e: &AudioError) -> &'static str {
+    match e {
+        AudioError::Command(_) | AudioError::Io(_) => "HARDWARE_ERROR",
+        AudioError::Parse(_) => "INTERNAL_ERROR",
+    }
 }
 
 /// Extract and validate `channel` (0–11) from request params.
@@ -876,7 +1569,7 @@ mod tests {
         }
 
         fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
-            Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
+            Ok(self.state.get(&pin_bcm).copied().unwrap_or(false))
         }
     }
 
@@ -1600,5 +2293,535 @@ mod tests {
             !pin_high,
             "speaker enable pin should be LOW after disable_speaker"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Mock AlsaControl for audio level tests
+    // ------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+
+    use crate::hat::audio::{AlsaControl, AudioError};
+
+    struct MockAlsaControl {
+        volume: AtomicU8,
+        mic_gain: AtomicU8,
+        fail: bool,
+    }
+
+    impl MockAlsaControl {
+        fn new(volume: u8, mic_gain: u8) -> Self {
+            Self {
+                volume: AtomicU8::new(volume),
+                mic_gain: AtomicU8::new(mic_gain),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                volume: AtomicU8::new(0),
+                mic_gain: AtomicU8::new(0),
+                fail: true,
+            }
+        }
+    }
+
+    impl AlsaControl for MockAlsaControl {
+        fn get_volume_pct(&self) -> Result<u8, AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            Ok(self.volume.load(AtomicOrdering::SeqCst))
+        }
+
+        fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            self.volume.store(pct, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+
+        fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            Ok(self.mic_gain.load(AtomicOrdering::SeqCst))
+        }
+
+        fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
+            if self.fail {
+                return Err(AudioError::Command("mock amixer error".into()));
+            }
+            self.mic_gain.store(pct, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_handler_with_mock_alsa(mock: MockAlsaControl) -> Handler {
+        let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
+        let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+        Handler::with_alsa(Arc::new(Config::default()), hat, gpio, Arc::new(mock))
+    }
+
+    // ------------------------------------------------------------------
+    // set_volume / get_volume
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_volume_stores_percentage_and_returns_it() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"v1","method":"set_volume","params":{"volume_pct":80}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["volume_pct"], 80);
+    }
+
+    #[tokio::test]
+    async fn get_volume_returns_stored_percentage() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(65, 40));
+        let raw = r#"{"id":"v2","method":"get_volume","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["volume_pct"], 65);
+    }
+
+    #[tokio::test]
+    async fn set_volume_rejects_out_of_range() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"v3","method":"set_volume","params":{"volume_pct":101}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_volume_missing_param_returns_invalid_params() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"v4","method":"set_volume","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_volume_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"v5","method":"set_volume","params":{"volume_pct":50}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    #[tokio::test]
+    async fn get_volume_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"v6","method":"get_volume","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    // ------------------------------------------------------------------
+    // set_mic_gain / get_mic_gain
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_mic_gain_stores_percentage_and_returns_it() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"g1","method":"set_mic_gain","params":{"gain_pct":70}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["gain_pct"], 70);
+    }
+
+    #[tokio::test]
+    async fn get_mic_gain_returns_stored_percentage() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(40, 35));
+        let raw = r#"{"id":"g2","method":"get_mic_gain","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["gain_pct"], 35);
+    }
+
+    #[tokio::test]
+    async fn set_mic_gain_rejects_out_of_range() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"g3","method":"set_mic_gain","params":{"gain_pct":200}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_mic_gain_missing_param_returns_invalid_params() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::new(50, 50));
+        let raw = r#"{"id":"g4","method":"set_mic_gain","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_mic_gain_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"g5","method":"set_mic_gain","params":{"gain_pct":50}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    #[tokio::test]
+    async fn get_mic_gain_hardware_error_returns_hardware_error_code() {
+        let handler = test_handler_with_mock_alsa(MockAlsaControl::failing());
+        let raw = r#"{"id":"g6","method":"get_mic_gain","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "HARDWARE_ERROR");
+    }
+
+    // ------------------------------------------------------------------
+    // Calibration handler tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_calibration_returns_defaults() {
+        let handler = test_handler();
+        let raw = r#"{"id":"c1","method":"get_calibration","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        let motors = &resp["result"]["motors"];
+        assert!(motors.is_array());
+        assert_eq!(motors[0]["speed_scale"], 1.0);
+        assert_eq!(motors[0]["deadband_pct"], 0.0);
+        assert_eq!(motors[0]["reversed"], false);
+        let servos = &resp["result"]["servos"];
+        assert_eq!(servos["steering"]["trim_us"], 0);
+        let grayscale = &resp["result"]["grayscale"];
+        assert_eq!(grayscale[0]["white_raw"], 100);
+        assert_eq!(grayscale[0]["black_raw"], 3000);
+    }
+
+    #[tokio::test]
+    async fn set_motor_calibration_partial_update_only_changes_speed_scale() {
+        let handler = test_handler();
+        // Set a full entry first.
+        handler
+            .dispatch(
+                r#"{"id":"c2a","method":"set_motor_calibration","params":{"channel":0,"speed_scale":1.5,"deadband_pct":5.0,"reversed":true}}"#,
+                0,
+            )
+            .await;
+        // Partial update — only speed_scale.
+        let raw = r#"{"id":"c2b","method":"set_motor_calibration","params":{"channel":0,"speed_scale":1.2}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["speed_scale"], 1.2);
+        // deadband_pct and reversed should be preserved from the earlier set.
+        assert_eq!(resp["result"]["deadband_pct"], 5.0);
+        assert_eq!(resp["result"]["reversed"], true);
+    }
+
+    #[tokio::test]
+    async fn set_motor_calibration_invalid_channel_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"c3","method":"set_motor_calibration","params":{"channel":99,"speed_scale":1.0}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_motor_calibration_rejects_out_of_range_speed_scale() {
+        let handler = test_handler();
+        let raw = r#"{"id":"c4","method":"set_motor_calibration","params":{"channel":0,"speed_scale":0.1}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_motor_calibration_rejects_out_of_range_deadband_pct() {
+        let handler = test_handler();
+        // Below lower bound (negative).
+        let raw = r#"{"id":"c_db1","method":"set_motor_calibration","params":{"channel":0,"deadband_pct":-1.0}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+        // Above upper bound.
+        let raw = r#"{"id":"c_db2","method":"set_motor_calibration","params":{"channel":0,"deadband_pct":21.0}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_servo_calibration_valid_steering_trim() {
+        let handler = test_handler();
+        let raw = r#"{"id":"c5","method":"set_servo_calibration","params":{"servo":"steering","trim_us":-50}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["servo"], "steering");
+        assert_eq!(resp["result"]["trim_us"], -50);
+    }
+
+    #[tokio::test]
+    async fn set_servo_calibration_invalid_name_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"c6","method":"set_servo_calibration","params":{"servo":"unknown_servo","trim_us":0}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn set_servo_calibration_rejects_out_of_range_trim_us() {
+        let handler = test_handler();
+        // Above upper bound (+501).
+        let raw = r#"{"id":"c_trim1","method":"set_servo_calibration","params":{"servo":"steering","trim_us":501}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+        // Below lower bound (-501).
+        let raw = r#"{"id":"c_trim2","method":"set_servo_calibration","params":{"servo":"steering","trim_us":-501}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn calibrate_grayscale_white_capture_stores_value() {
+        // ADC returns [0, 0] → raw = 0, well below default black_raw=3000.
+        let handler = test_handler();
+        let raw = r#"{"id":"c7","method":"calibrate_grayscale","params":{"channel":0,"surface":"white"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 0);
+        assert_eq!(resp["result"]["surface"], "white");
+        assert_eq!(resp["result"]["stored"], true);
+    }
+
+    #[tokio::test]
+    async fn calibrate_grayscale_black_capture_stores_value() {
+        // ADC returns [0x0F, 0xFF] → raw = 4095, well above default white_raw=100.
+        let handler = test_handler_with_adc(0x0F, 0xFF);
+        let raw = r#"{"id":"c8","method":"calibrate_grayscale","params":{"channel":1,"surface":"black"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["channel"], 1);
+        assert_eq!(resp["result"]["surface"], "black");
+        assert_eq!(resp["result"]["stored"], true);
+    }
+
+    #[tokio::test]
+    async fn calibrate_grayscale_constraint_violation_returns_invalid_params() {
+        // ADC returns [0xFF, 0xFF] → raw = 65535.
+        // Trying to store this as white_raw (65535 >= black_raw=3000) violates constraint.
+        let handler = test_handler_with_adc(0xFF, 0xFF);
+        let raw = r#"{"id":"c9","method":"calibrate_grayscale","params":{"channel":0,"surface":"white"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn calibrate_grayscale_invalid_channel_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"c_gs_inv","method":"calibrate_grayscale","params":{"channel":3,"surface":"white"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn save_calibration_writes_to_configured_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cal_path = dir.path().join("calibration.toml");
+        let handler = test_handler_with_config(Arc::new(Config {
+            calibration_path: cal_path.clone(),
+            ..Default::default()
+        }));
+
+        let raw = r#"{"id":"c10","method":"save_calibration","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["saved"], true);
+        assert!(cal_path.exists(), "calibration file must exist after save");
+    }
+
+    #[tokio::test]
+    async fn reset_calibration_reverts_modified_store() {
+        let handler = test_handler();
+        // Apply a non-default value.
+        handler
+            .dispatch(
+                r#"{"id":"r1","method":"set_motor_calibration","params":{"channel":0,"speed_scale":1.8}}"#,
+                0,
+            )
+            .await;
+        // Reset.
+        let raw = r#"{"id":"r2","method":"reset_calibration","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["reset"], true);
+
+        // Verify reset to 1.0.
+        let snap: serde_json::Value = serde_json::from_str(
+            &handler
+                .dispatch(r#"{"id":"r3","method":"get_calibration","params":{}}"#, 0)
+                .await,
+        )
+        .unwrap();
+        assert_eq!(snap["result"]["motors"][0]["speed_scale"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn read_grayscale_normalized_returns_clamped_zero_for_raw_below_white() {
+        // ADC returns [0, 0] → raw=0; white_raw=100; normalized = clamp((0-100)/(3000-100), 0,1) = 0.0
+        let handler = test_handler();
+        let raw = r#"{"id":"n1","method":"read_grayscale_normalized","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        let normalized = &resp["result"]["normalized"];
+        assert!(normalized.is_array());
+        for n in normalized.as_array().unwrap() {
+            assert_eq!(*n, serde_json::json!(0.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn read_grayscale_normalized_mid_range_value() {
+        // ADC returns [0x08, 0x98] = 2200. With defaults white=100, black=3000:
+        // normalized = (2200 - 100) / (3000 - 100) = 2100/2900 ≈ 0.7241
+        let handler = test_handler_with_adc(0x08, 0x98);
+        let raw = r#"{"id":"n2","method":"read_grayscale_normalized","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        let n0 = resp["result"]["normalized"][0].as_f64().unwrap();
+        let expected = (2200.0_f64 - 100.0) / (3000.0 - 100.0);
+        assert!(
+            (n0 - expected).abs() < 0.005,
+            "expected ≈{expected:.4}, got {n0}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Routine handler tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn start_routine_returns_started() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt1","method":"start_routine","params":{"name":"explore"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["name"], "explore");
+        assert!(resp["result"]["started_at_uptime_s"].is_number());
+    }
+
+    #[tokio::test]
+    async fn start_routine_unknown_name_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt2","method":"start_routine","params":{"name":"fly"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn start_routine_already_running_returns_already_running() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt3a","method":"start_routine","params":{"name":"explore"}}"#;
+        handler.dispatch(raw, 0).await;
+        let raw2 = r#"{"id":"rt3b","method":"start_routine","params":{"name":"explore"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw2, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "ALREADY_RUNNING");
+    }
+
+    #[tokio::test]
+    async fn stop_routine_returns_stats() {
+        let handler = test_handler();
+        let start_raw = r#"{"id":"rt4a","method":"start_routine","params":{"name":"explore"}}"#;
+        handler.dispatch(start_raw, 0).await;
+        let stop_raw = r#"{"id":"rt4b","method":"stop_routine","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(stop_raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["name"], "explore");
+        assert!(resp["result"]["ran_for_s"].is_number());
+        assert!(resp["result"]["obstacles_avoided"].is_number());
+        assert!(resp["result"]["cliffs_avoided"].is_number());
+        assert!(resp["result"]["stop_reason"].is_string());
+    }
+
+    #[tokio::test]
+    async fn stop_routine_not_running_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt5","method":"stop_routine","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn get_routine_status_idle_returns_not_running() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt6","method":"get_routine_status","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["running"], false);
+        assert!(resp["result"]["name"].is_null());
+        assert!(resp["result"]["elapsed_s"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_routine_status_running_returns_running() {
+        let handler = test_handler();
+        let start_raw = r#"{"id":"rt7a","method":"start_routine","params":{"name":"explore"}}"#;
+        handler.dispatch(start_raw, 0).await;
+        let raw = r#"{"id":"rt7b","method":"get_routine_status","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["running"], true);
+        assert_eq!(resp["result"]["name"], "explore");
+        assert!(resp["result"]["elapsed_s"].is_number());
     }
 }

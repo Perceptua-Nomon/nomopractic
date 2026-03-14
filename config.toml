@@ -51,3 +51,34 @@ timeout_ms   = 20   # abort measurement after this many ms
 # Speaker amplifier enable GPIO pin (BCM).
 # On Robot HAT V4 this is BCM 20 (spk_en).  Setting HIGH enables the amplifier.
 speaker_en_pin_bcm = 20
+
+# ─── Calibration ────────────────────────────────────────────────────────────
+# Motor, servo, and sensor calibration values are persisted to this file.
+# Runtime changes via `set_motor_calibration`, `set_servo_calibration`, and
+# `calibrate_grayscale` take effect immediately; `save_calibration` writes
+# them here so they survive daemon restarts.
+
+calibration_path = "/etc/nomopractic/calibration.toml"
+
+# ─── Audio levels (ALSA mixer control) ──────────────────────────────────────
+# Controls output volume (HifiBerry DAC) and mic capture gain (PCM2902 USB mic)
+# via `amixer`.  Card indices and control names can be confirmed with
+# `aplay -l` / `arecord -l` / `amixer -c <idx> scontrols`.
+
+[audio]
+output_card_index = 1             # ALSA card index for HifiBerry DAC output
+output_control    = "Digital"     # ALSA sset control name for output volume
+input_card_index  = 2             # ALSA card index for USB mic (PCM2902)
+input_control     = "Mic Capture" # ALSA sset control name for capture gain
+
+# ─── Routine Engine ──────────────────────────────────────────────────────────
+# Configuration for autonomous on-robot routines (Phase 11).
+
+[routine]
+explore_speed_pct          = 30.0   # Drive speed during explore (1.0–100.0 %)
+obstacle_threshold_cm      = 25.0   # Stop and avoid if distance < this (cm)
+cliff_threshold_normalized = 0.7    # Treat as cliff if normalised value >= this (0.0–1.0)
+loop_interval_ms           = 100    # Sensor poll interval (ms, >= 50)
+avoidance_backup_ms        = 500    # Duration to reverse during avoidance (ms)
+avoidance_turn_angle_deg   = 60.0   # Degrees added to 90° for avoidance turn
+max_duration_s             = 300    # Auto-stop after this many seconds

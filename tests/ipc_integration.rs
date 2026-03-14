@@ -1,13 +1,16 @@
 // Integration test: start IPC listener, connect, send requests, verify responses.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
+use nomopractic::hat::audio::{AlsaControl, AudioError};
 use nomopractic::hat::gpio::{GpioBus, GpioError, HatGpio};
 use nomopractic::hat::i2c::{Hat, HatError, I2cBus};
+use nomopractic::ipc::handler::Handler;
 
 // ---------------------------------------------------------------------------
 // Mock I2C bus
@@ -68,6 +71,41 @@ impl GpioBus for MockGpio {
 }
 
 // ---------------------------------------------------------------------------
+// Mock ALSA control (hermetic — never touches the host mixer)
+// ---------------------------------------------------------------------------
+
+struct MockAlsaControl {
+    volume: AtomicU8,
+    mic_gain: AtomicU8,
+}
+
+impl MockAlsaControl {
+    fn new() -> Self {
+        Self {
+            volume: AtomicU8::new(50),
+            mic_gain: AtomicU8::new(50),
+        }
+    }
+}
+
+impl AlsaControl for MockAlsaControl {
+    fn get_volume_pct(&self) -> Result<u8, AudioError> {
+        Ok(self.volume.load(AtomicOrdering::SeqCst))
+    }
+    fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
+        self.volume.store(pct, AtomicOrdering::SeqCst);
+        Ok(())
+    }
+    fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
+        Ok(self.mic_gain.load(AtomicOrdering::SeqCst))
+    }
+    fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
+        self.mic_gain.store(pct, AtomicOrdering::SeqCst);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test server helpers
 // ---------------------------------------------------------------------------
 
@@ -102,12 +140,16 @@ async fn start_test_server_with_adc(
 
     let hat = Arc::new(Hat::new(MockI2c::new(hi, lo), config.hat_address));
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
+    let alsa: Arc<dyn AlsaControl> = Arc::new(MockAlsaControl::new());
+
+    let handler = Arc::new(Handler::with_alsa(Arc::clone(&config), hat, gpio, alsa));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let cfg = Arc::clone(&config);
     let handle =
-        tokio::spawn(async move { nomopractic::ipc::serve(cfg, hat, gpio, shutdown_rx).await });
+        tokio::spawn(
+            async move { nomopractic::ipc::serve_with_handler(handler, shutdown_rx).await },
+        );
 
     // Give the listener a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -780,6 +822,350 @@ async fn write_gpio_input_pin_returns_invalid_params_over_socket() {
     assert_eq!(resp["id"], "gpio3");
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_volume_valid_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"vol1","method":"set_volume","params":{"volume_pct":75}}"#,
+    )
+    .await;
+
+    // MockAlsaControl always succeeds — assert a full success response.
+    assert_eq!(resp["id"], "vol1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["volume_pct"], 75);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_volume_out_of_range_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"vol2","method":"set_volume","params":{"volume_pct":101}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "vol2");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_volume_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"vol3","method":"get_volume","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "vol3");
+    assert_eq!(resp["ok"], true);
+    assert!(resp["result"]["volume_pct"].is_number());
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_mic_gain_valid_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"mg1","method":"set_mic_gain","params":{"gain_pct":50}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "mg1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["gain_pct"], 50);
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_mic_gain_out_of_range_returns_invalid_params_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"mg2","method":"set_mic_gain","params":{"gain_pct":200}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "mg2");
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_mic_gain_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"mg3","method":"get_mic_gain","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "mg3");
+    assert_eq!(resp["ok"], true);
+    assert!(resp["result"]["gain_pct"].is_number());
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+// ---------------------------------------------------------------------------
+// Calibration IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_calibration_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"cal1","method":"get_calibration","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "cal1");
+    assert_eq!(resp["ok"], true);
+    assert!(
+        resp["result"]["motors"].is_array(),
+        "motors must be an array"
+    );
+    assert!(
+        resp["result"]["servos"].is_object(),
+        "servos must be an object"
+    );
+    assert!(
+        resp["result"]["grayscale"].is_array(),
+        "grayscale must be an array"
+    );
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn set_motor_calibration_over_socket() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"cal2","method":"set_motor_calibration","params":{"channel":0,"speed_scale":1.2}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "cal2");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["channel"], 0);
+    assert_eq!(resp["result"]["speed_scale"], 1.2_f64);
+    assert!(resp["result"]["deadband_pct"].is_number());
+    assert!(resp["result"]["reversed"].is_boolean());
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn save_calibration_over_socket() {
+    // Use a temp dir for both the socket and the calibration file so that
+    // the save succeeds even in CI where /etc/nomopractic is not writable.
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("test.sock");
+    let cal_path = dir.path().join("calibration.toml");
+
+    let config = std::sync::Arc::new(nomopractic::config::Config {
+        socket_path: sock_path,
+        calibration_path: cal_path.clone(),
+        ..Default::default()
+    });
+
+    let hat = std::sync::Arc::new(nomopractic::hat::i2c::Hat::new(
+        MockI2c::new(0, 0),
+        config.hat_address,
+    ));
+    let gpio = std::sync::Arc::new(nomopractic::hat::gpio::HatGpio::new(MockGpio::new()));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let cfg = std::sync::Arc::clone(&config);
+    let handle =
+        tokio::spawn(async move { nomopractic::ipc::serve(cfg, hat, gpio, shutdown_rx).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    let resp = request(
+        &mut reader,
+        r#"{"id":"cal3","method":"save_calibration","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "cal3");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["saved"], true);
+    assert!(cal_path.exists(), "calibration file must exist after save");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+// ---------------------------------------------------------------------------
+// Routine IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_start_routine_and_get_status() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Start the explore routine with a short max_duration to avoid leaving it running.
+    let resp = request(
+        &mut reader,
+        r#"{"id":"rtn1","method":"start_routine","params":{"name":"explore","max_duration_s":1}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "rtn1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["name"], "explore");
+
+    // Status must show the routine is running.
+    let resp2 = request(
+        &mut reader,
+        r#"{"id":"rtn2","method":"get_routine_status","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp2["ok"], true);
+    assert_eq!(resp2["result"]["running"], true);
+    assert_eq!(resp2["result"]["name"], "explore");
+
+    // Stop the routine to clean up before the server shuts down.
+    let _ = request(
+        &mut reader,
+        r#"{"id":"rtn3","method":"stop_routine","params":{}}"#,
+    )
+    .await;
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_stop_routine_not_running() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Stop without starting — must return INVALID_PARAMS.
+    let resp = request(
+        &mut reader,
+        r#"{"id":"rtn4","method":"stop_routine","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_start_routine_already_running() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // First start — must succeed.
+    let resp1 = request(
+        &mut reader,
+        r#"{"id":"rtn5","method":"start_routine","params":{"name":"explore","max_duration_s":1}}"#,
+    )
+    .await;
+    assert_eq!(resp1["ok"], true);
+
+    // Second start while already running — must return ALREADY_RUNNING.
+    let resp2 = request(
+        &mut reader,
+        r#"{"id":"rtn6","method":"start_routine","params":{"name":"explore"}}"#,
+    )
+    .await;
+
+    assert_eq!(resp2["ok"], false);
+    assert_eq!(resp2["error"]["code"], "ALREADY_RUNNING");
+
+    // Stop to clean up.
+    let _ = request(
+        &mut reader,
+        r#"{"id":"rtn7","method":"stop_routine","params":{}}"#,
+    )
+    .await;
 
     let _ = shutdown_tx.send(true);
     drop(reader);
