@@ -358,7 +358,7 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 8 | Peripheral Expansion | ✅ Complete | 149 |
 | 9 | Audio Levels Control | ✅ Complete | 168 |
 | 10 | Calibration & Configuration | ✅ Complete | 206 |
-| 11 | Routine Engine | 🔲 Planned | — |
+| 11 | Routine Engine | ✅ Complete | 222 |
 | 12 | Line-Following Routine | 🔲 Planned | — |
 
 ---
@@ -568,62 +568,63 @@ task continuously refreshes motor leases; if the task panics or is stopped, the
 watchdog idles all motors within `ttl_ms` milliseconds.
 
 #### 11.0 — RoutineConfig
-- [ ] `config.rs`: `RoutineConfig { explore_speed_pct: f64, obstacle_threshold_cm: f64, cliff_threshold_raw: u16, loop_interval_ms: u64, avoidance_backup_ms: u64, avoidance_turn_angle_deg: f64 }`
-  - Defaults: speed `30.0`, obstacle `25.0 cm`, cliff raw `2000`, loop `100 ms`, backup `500 ms`, turn `60°`
-- [ ] `[routine]` TOML section added to `config.toml`
-- [ ] Validation: speed in 1.0–100.0, thresholds > 0, loop_interval ≥ 50 ms
+- [x] `config.rs`: `RoutineConfig { explore_speed_pct: f64, obstacle_threshold_cm: f64, cliff_threshold_normalized: f64, loop_interval_ms: u64, avoidance_backup_ms: u64, avoidance_turn_angle_deg: f64 }`
+  - Defaults: speed `30.0`, obstacle `25.0 cm`, cliff_normalized `0.7` (0.0 = white/reflective, 1.0 = black/non-reflective), loop `100 ms`, backup `500 ms`, turn `60°`
+- [x] `[routine]` TOML section added to `config.toml`
+- [x] Validation: speed in 1.0–100.0, `obstacle_threshold_cm > 0`, `cliff_threshold_normalized` ∈ 0.0–1.0, `loop_interval_ms ≥ 50`
 
 #### 11.1 — Routine Module (`routine/`)
-- [ ] `src/routine/mod.rs`: `RoutineEngine`, `RoutineState` enum (`Idle | Running | Stopping`), `RoutineStats { obstacles_avoided, cliffs_avoided }`
-- [ ] `RoutineEngine` holds `Arc<Hat>`, `Arc<HatGpio>`, `Arc<Config>`, `Arc<LeaseManager>` (motor leases)
-- [ ] Stop signal: `Arc<std::sync::atomic::AtomicBool>` (no new dependencies)
-- [ ] `ROUTINE_CONN_ID: u64 = 0` constant — pseudo-connection ID for routine-owned motor leases
-- [ ] `start(name, params) -> Result<(), RoutineError>`: spawns `tokio::spawn` task; returns `ALREADY_RUNNING` if occupied
-- [ ] `stop() -> Option<RoutineStats>`: sets stop flag, awaits `JoinHandle` (with 2 s timeout), stops all motors
-- [ ] `status() -> RoutineStatusSnapshot`: `{ running, name, elapsed_s, stats }`
+- [x] `src/routine/mod.rs`: `RoutineEngine`, `RoutineState` enum (`Idle | Running | Stopping`), `RoutineStats { obstacles_avoided, cliffs_avoided }`
+- [x] `RoutineEngine` holds `Arc<Hat>`, `Arc<HatGpio>`, `Arc<Config>`, `Arc<tokio::sync::Mutex<CalibrationStore>>`, `Arc<LeaseManager>` (motor leases)
+  - `CalibrationStore` ref needed so `explore_task` can apply normalised cliff detection using live calibration
+- [x] Stop signal: `Arc<std::sync::atomic::AtomicBool>` (no new dependencies)
+- [x] `ROUTINE_CONN_ID: u64 = 0` constant — pseudo-connection ID for routine-owned motor leases
+- [x] `start(name, params) -> Result<(), RoutineError>`: spawns `tokio::spawn` task; returns `ALREADY_RUNNING` if occupied
+- [x] `stop() -> Option<RoutineStats>`: sets stop flag, awaits `JoinHandle` (with 2 s timeout), stops all motors
+- [x] `status() -> RoutineStatusSnapshot`: `{ running, name, elapsed_s, stats }`
 
 #### 11.2 — Explore Routine (`routine/explore.rs`)
-- [ ] `explore_task(hat, gpio, motor_lease_manager, config, params, stats, stop_flag)` async fn
-- [ ] Loop at `loop_interval_ms` (default 100 ms):
+- [x] `explore_task(hat, gpio, motor_lease_manager, config, params, stats, stop_flag)` async fn
+- [x] Loop at `loop_interval_ms` (default 100 ms):
   1. Check stop flag and `max_duration_s` — exit if either triggered
   2. Read ultrasonic distance (`read_distance_cm`)
-  3. Read grayscale ADC channels from `config.sensors.grayscale`
-  4. **Cliff detected** (`any grayscale raw ≥ cliff_threshold_raw`): stop motors → reverse `avoidance_backup_ms` → steer away from cliff channel → resume straight; increment `cliffs_avoided`
+  3. Read normalised grayscale: compute `(raw − white_raw) / (black_raw − white_raw)` per channel using live `CalibrationStore` values (0.0 = white/reflective, 1.0 = black/non-reflective)
+  4. **Cliff detected** (`any normalized_value ≥ cliff_threshold_normalized`): stop motors → reverse `avoidance_backup_ms` → steer away from the most-dark channel → resume straight; increment `cliffs_avoided`
   5. **Obstacle detected** (`distance ≤ obstacle_threshold_cm` or ultrasonic timeout): stop motors → reverse `avoidance_backup_ms` → steer `avoidance_turn_angle_deg` right → resume straight; increment `obstacles_avoided`
   6. **Clear**: `drive(speed_pct, ttl_ms=2000)` + `steer(90°, ttl_ms=2000)`
-- [ ] On task exit (any reason): call `stop_all_motors` + clear motor leases
-- [ ] Ultrasonic read errors treated as obstacle (fail-safe)
+- [x] On task exit (any reason): call `stop_all_motors` + clear motor leases
+- [x] Ultrasonic read errors treated as obstacle (fail-safe)
 
 #### 11.3 — IPC Methods
-- [ ] `start_routine { name, speed_pct?, obstacle_threshold_cm?, cliff_threshold_raw?, max_duration_s? }` → `{ name, started_at_uptime_s }`
+- [x] `start_routine { name, speed_pct?, obstacle_threshold_cm?, cliff_threshold_normalized?, max_duration_s? }` → `{ name, started_at_uptime_s }`
   - `name` must be a known routine name (`"explore"`); `INVALID_PARAMS` otherwise
   - `ALREADY_RUNNING` error code returned if a routine is active
   - Per-call params override config defaults (not persisted)
-- [ ] `stop_routine {}` → `{ name, ran_for_s, obstacles_avoided, cliffs_avoided, stop_reason: "commanded" | "timeout" | "error" }`
+- [x] `stop_routine {}` → `{ name, ran_for_s, obstacles_avoided, cliffs_avoided, stop_reason: "commanded" | "timeout" | "error" }`
   - `INVALID_PARAMS` if no routine is running
-- [ ] `get_routine_status {}` → `{ running: bool, name: string | null, elapsed_s: integer | null, obstacles_avoided: integer | null, cliffs_avoided: integer | null }`
-- [ ] All three wired up in `ipc/handler.rs`; `RoutineEngine` held in `Handler` behind `Arc<tokio::sync::Mutex<RoutineEngine>>`
-- [ ] New error code `ALREADY_RUNNING` added to IPC schema error code table
+- [x] `get_routine_status {}` → `{ running: bool, name: string | null, elapsed_s: integer | null, obstacles_avoided: integer | null, cliffs_avoided: integer | null }`
+- [x] All three wired up in `ipc/handler.rs`; `RoutineEngine` held in `Handler` behind `Arc<tokio::sync::Mutex<RoutineEngine>>`
+- [x] New error code `ALREADY_RUNNING` added to IPC schema error code table
 
 #### 11.4 — Safety
-- [ ] `max_duration_s` param (default: 300 s) auto-stops the routine after the time limit; `stop_reason: "timeout"`
-- [ ] Task panic — if `JoinHandle` returns `Err`, `stop()` logs `error!` and still stops all motors; `stop_reason: "error"`
-- [ ] Mutex guard over `RoutineEngine` is dropped before every `await` in the handler (no deadlocks)
-- [ ] Routine cannot starve the IPC handler — it runs on a separate Tokio task
+- [x] `max_duration_s` param (default: 300 s) auto-stops the routine after the time limit; `stop_reason: "timeout"`
+- [x] Task panic — if `JoinHandle` returns `Err`, `stop()` logs `error!` and still stops all motors; `stop_reason: "error"`
+- [x] Mutex guard over `RoutineEngine` is dropped before every `await` in the handler (no deadlocks)
+- [x] Routine cannot starve the IPC handler — it runs on a separate Tokio task
 
 #### 11.5 — Tests
-- [ ] `routine/mod.rs`: unit tests — start (idle→running), double-start rejected, stop (running→idle), status (idle), status (running)
-- [ ] `routine/explore.rs`: unit tests with mocked sensor reads — obstacle→reverse→turn sequence, cliff→reverse sequence, clear→drive-straight, max_duration exit
-- [ ] `ipc/handler.rs`: unit tests — `start_routine` success, `start_routine` unknown name, `start_routine` ALREADY_RUNNING, `stop_routine` success, `stop_routine` not-running, `get_routine_status` idle, `get_routine_status` running
+- [x] `routine/mod.rs`: unit tests — start (idle→running), double-start rejected, stop (running→idle), status (idle), status (running)
+- [x] `routine/explore.rs`: unit tests with mocked sensor reads — obstacle→reverse→turn sequence, cliff→reverse sequence, clear→drive-straight, max_duration exit
+- [x] `ipc/handler.rs`: unit tests — `start_routine` success, `start_routine` unknown name, `start_routine` ALREADY_RUNNING, `stop_routine` success, `stop_routine` not-running, `get_routine_status` idle, `get_routine_status` running
 
 #### Phase 11 Exit Criteria
-- [ ] `start_routine { "name": "explore" }` navigates autonomously until stopped
-- [ ] `stop_routine` arrests all motors and returns telemetry stats
-- [ ] Routine continues through IPC client disconnect; motors stop on explicit `stop_routine` or timeout
-- [ ] All tests pass without hardware
-- [ ] `cargo test` — all tests pass (target ≥ 188 tests)
-- [ ] `cargo clippy -- -D warnings` clean
-- [ ] `cargo fmt --check` clean
+- [x] `start_routine { "name": "explore" }` navigates autonomously until stopped
+- [x] `stop_routine` arrests all motors and returns telemetry stats
+- [x] Routine continues through IPC client disconnect; motors stop on explicit `stop_routine` or timeout
+- [x] All tests pass without hardware
+- [x] `cargo test` — 222 tests passing (184 unit + 38 integration)
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
 
 ---
 

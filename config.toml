@@ -72,3 +72,15 @@ default_mic_gain_pct = 50              # Default mic capture gain (0–100)
 # them here so they survive daemon restarts.
 
 calibration_path = "/etc/nomopractic/calibration.toml"
+
+# ─── Routine Engine ──────────────────────────────────────────────────────────
+# Configuration for autonomous on-robot routines (Phase 11).
+
+[routine]
+explore_speed_pct          = 30.0   # Drive speed during explore (1.0–100.0 %)
+obstacle_threshold_cm      = 25.0   # Stop and avoid if distance < this (cm)
+cliff_threshold_normalized = 0.7    # Treat as cliff if normalised value >= this (0.0–1.0)
+loop_interval_ms           = 100    # Sensor poll interval (ms, >= 50)
+avoidance_backup_ms        = 500    # Duration to reverse during avoidance (ms)
+avoidance_turn_angle_deg   = 60.0   # Degrees added to 90° for avoidance turn
+max_duration_s             = 300    # Auto-stop after this many seconds

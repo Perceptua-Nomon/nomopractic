@@ -19,6 +19,7 @@ use crate::hat::servo::LeaseManager;
 use crate::hat::ultrasonic;
 use crate::hat::{pwm, servo};
 use crate::reset;
+use crate::routine::RoutineEngine;
 
 /// Minimum interval between consecutive MCU reset requests (ms).
 const RESET_MIN_INTERVAL_MS: u64 = 1000;
@@ -69,6 +70,7 @@ pub struct Handler {
     mcu_state: tokio::sync::Mutex<McuState>,
     alsa: Arc<dyn AlsaControl>,
     calibration: Arc<tokio::sync::Mutex<CalibrationStore>>,
+    routine: Arc<tokio::sync::Mutex<RoutineEngine>>,
 }
 
 impl Handler {
@@ -94,6 +96,13 @@ impl Handler {
         let n_motors = config.motors.len();
         let calibration_store =
             CalibrationStore::load_or_default(&config.calibration_path, n_motors);
+        let calibration = Arc::new(tokio::sync::Mutex::new(calibration_store));
+        let routine = Arc::new(tokio::sync::Mutex::new(RoutineEngine::new(
+            hat.clone(),
+            gpio.clone(),
+            config.clone(),
+            calibration.clone(),
+        )));
         Self {
             config,
             start_time: Instant::now(),
@@ -106,7 +115,8 @@ impl Handler {
                 last_reset_at: None,
             }),
             alsa,
-            calibration: Arc::new(tokio::sync::Mutex::new(calibration_store)),
+            calibration,
+            routine,
         }
     }
 
@@ -210,6 +220,10 @@ impl Handler {
             "read_grayscale_normalized" => self.handle_read_grayscale_normalized(&request).await,
             "save_calibration" => self.handle_save_calibration(&request).await,
             "reset_calibration" => self.handle_reset_calibration(&request).await,
+            // Routine methods.
+            "start_routine" => self.handle_start_routine(&request).await,
+            "stop_routine" => self.handle_stop_routine(&request).await,
+            "get_routine_status" => self.handle_get_routine_status(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -1304,6 +1318,139 @@ impl Handler {
         *guard = fresh;
         drop(guard);
         Response::ok(request.id.clone(), json!({ "reset": true }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Routine methods
+    // -----------------------------------------------------------------------
+
+    /// `start_routine { name, speed_pct?, obstacle_threshold_cm?,
+    ///   cliff_threshold_normalized?, max_duration_s? }` — start a named
+    /// autonomous routine with optional per-run overrides.
+    async fn handle_start_routine(&self, request: &Request) -> Response {
+        let name = match request.params.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n.to_owned(),
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "name is required");
+            }
+        };
+
+        // Optional float overrides — validate if present.
+        let speed_pct = if let Some(s) = request.params.get("speed_pct").and_then(|v| v.as_f64()) {
+            if !(1.0..=100.0).contains(&s) {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("speed_pct {s} is out of range 1.0–100.0"),
+                );
+            }
+            Some(s)
+        } else {
+            None
+        };
+
+        let obstacle_threshold_cm = if let Some(v) = request
+            .params
+            .get("obstacle_threshold_cm")
+            .and_then(|v| v.as_f64())
+        {
+            if v <= 0.0 {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "obstacle_threshold_cm must be > 0.0",
+                );
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let cliff_threshold_normalized = if let Some(v) = request
+            .params
+            .get("cliff_threshold_normalized")
+            .and_then(|v| v.as_f64())
+        {
+            if !(0.0..=1.0).contains(&v) {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    format!("cliff_threshold_normalized {v} is out of range 0.0–1.0"),
+                );
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let max_duration_s = request
+            .params
+            .get("max_duration_s")
+            .and_then(|v| v.as_u64());
+
+        let mut engine = self.routine.lock().await;
+        match engine.start(
+            &name,
+            speed_pct,
+            obstacle_threshold_cm,
+            cliff_threshold_normalized,
+            max_duration_s,
+        ) {
+            Ok(uptime) => Response::ok(
+                request.id.clone(),
+                json!({ "name": name, "started_at_uptime_s": uptime }),
+            ),
+            Err("ALREADY_RUNNING") => Response::err(
+                request.id.clone(),
+                "ALREADY_RUNNING",
+                "a routine is already running",
+            ),
+            Err(_) => Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                format!("routine '{}' is not recognised; valid: explore", name),
+            ),
+        }
+    }
+
+    /// `stop_routine {}` — stop the active routine and return final stats.
+    async fn handle_stop_routine(&self, request: &Request) -> Response {
+        let mut engine = self.routine.lock().await;
+        match engine.stop().await {
+            Ok(result) => Response::ok(
+                request.id.clone(),
+                json!({
+                    "name": result.name,
+                    "ran_for_s": result.ran_for_s,
+                    "obstacles_avoided": result.obstacles_avoided,
+                    "cliffs_avoided": result.cliffs_avoided,
+                    "stop_reason": result.stop_reason,
+                }),
+            ),
+            Err(_) => Response::err(
+                request.id.clone(),
+                "INVALID_PARAMS",
+                "no routine is currently running",
+            ),
+        }
+    }
+
+    /// `get_routine_status {}` — return current routine state without
+    /// affecting it.
+    async fn handle_get_routine_status(&self, request: &Request) -> Response {
+        let engine = self.routine.lock().await;
+        let s = engine.status();
+        drop(engine);
+        Response::ok(
+            request.id.clone(),
+            json!({
+                "running": s.running,
+                "name": s.name,
+                "elapsed_s": s.elapsed_s,
+                "obstacles_avoided": s.obstacles_avoided,
+                "cliffs_avoided": s.cliffs_avoided,
+            }),
+        )
     }
 }
 
@@ -2553,5 +2700,94 @@ mod tests {
             (n0 - expected).abs() < 0.005,
             "expected ≈{expected:.4}, got {n0}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Routine handler tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn start_routine_returns_started() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt1","method":"start_routine","params":{"name":"explore"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["name"], "explore");
+        assert!(resp["result"]["started_at_uptime_s"].is_number());
+    }
+
+    #[tokio::test]
+    async fn start_routine_unknown_name_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt2","method":"start_routine","params":{"name":"fly"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn start_routine_already_running_returns_already_running() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt3a","method":"start_routine","params":{"name":"explore"}}"#;
+        handler.dispatch(raw, 0).await;
+        let raw2 = r#"{"id":"rt3b","method":"start_routine","params":{"name":"explore"}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw2, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "ALREADY_RUNNING");
+    }
+
+    #[tokio::test]
+    async fn stop_routine_returns_stats() {
+        let handler = test_handler();
+        let start_raw = r#"{"id":"rt4a","method":"start_routine","params":{"name":"explore"}}"#;
+        handler.dispatch(start_raw, 0).await;
+        let stop_raw = r#"{"id":"rt4b","method":"stop_routine","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(stop_raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["name"], "explore");
+        assert!(resp["result"]["ran_for_s"].is_number());
+        assert!(resp["result"]["obstacles_avoided"].is_number());
+        assert!(resp["result"]["cliffs_avoided"].is_number());
+        assert!(resp["result"]["stop_reason"].is_string());
+    }
+
+    #[tokio::test]
+    async fn stop_routine_not_running_returns_invalid_params() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt5","method":"stop_routine","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn get_routine_status_idle_returns_not_running() {
+        let handler = test_handler();
+        let raw = r#"{"id":"rt6","method":"get_routine_status","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["running"], false);
+        assert!(resp["result"]["name"].is_null());
+        assert!(resp["result"]["elapsed_s"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_routine_status_running_returns_running() {
+        let handler = test_handler();
+        let start_raw = r#"{"id":"rt7a","method":"start_routine","params":{"name":"explore"}}"#;
+        handler.dispatch(start_raw, 0).await;
+        let raw = r#"{"id":"rt7b","method":"get_routine_status","params":{}}"#;
+        let resp: serde_json::Value =
+            serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["running"], true);
+        assert_eq!(resp["result"]["name"], "explore");
+        assert!(resp["result"]["elapsed_s"].is_number());
     }
 }

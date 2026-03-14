@@ -76,6 +76,10 @@ main.rs
   │   ├── motor.rs        (H-bridge dir GPIO + PWM duty; TTL lease watchdog)
   │   ├── gpio.rs         (named pin abstraction; D2/D3/MCURST/SpeakerEn…)
   │   └── ultrasonic.rs   (HC-SR04 TRIG/ECHO GPIO timing)
+  ├── calibration.rs      (CalibrationStore: motor/servo/grayscale calibration)
+  ├── routine/
+  │   ├── mod.rs          (RoutineEngine, RoutineState, RoutineStats)
+  │   └── explore.rs      (explore_task: ultrasonic + normalised grayscale sensor-actuator loop)
   └── reset.rs            (MCU reset via BCM5)
 ```
 
@@ -174,6 +178,9 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `read_grayscale_normalized` | — | `channels: [u8; 3]`, `normalized: [f64; 3]` |
 | `save_calibration` | — | `saved`, `path` |
 | `reset_calibration` | — | `reset` |
+| `start_routine` | `name`, `speed_pct?`, `obstacle_threshold_cm?`, `cliff_threshold_normalized?`, `max_duration_s?` | `name`, `started_at_uptime_s` |
+| `stop_routine` | — | `name`, `ran_for_s`, `obstacles_avoided`, `cliffs_avoided`, `stop_reason` |
+| `get_routine_status` | — | `running`, `name?`, `elapsed_s?`, `obstacles_avoided?`, `cliffs_avoided?` |
 
 ### Error Codes
 
@@ -184,6 +191,7 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `HARDWARE_ERROR` | I2C/SPI/GPIO bus failure |
 | `NOT_READY` | Daemon still initializing |
 | `SERVO_LEASE_EXPIRED` | TTL elapsed, servo was idled |
+| `ALREADY_RUNNING` | A routine is already active; stop it before starting a new one |
 | `INTERNAL_ERROR` | Unexpected daemon bug |
 
 ## Concurrency Model

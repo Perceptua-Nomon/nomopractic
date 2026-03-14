@@ -1028,3 +1028,107 @@ async fn save_calibration_over_socket() {
     drop(reader);
     let _ = handle.await;
 }
+
+// ---------------------------------------------------------------------------
+// Routine IPC integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_start_routine_and_get_status() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Start the explore routine with a short max_duration to avoid leaving it running.
+    let resp = request(
+        &mut reader,
+        r#"{"id":"rtn1","method":"start_routine","params":{"name":"explore","max_duration_s":1}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["id"], "rtn1");
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"]["name"], "explore");
+
+    // Status must show the routine is running.
+    let resp2 = request(
+        &mut reader,
+        r#"{"id":"rtn2","method":"get_routine_status","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp2["ok"], true);
+    assert_eq!(resp2["result"]["running"], true);
+    assert_eq!(resp2["result"]["name"], "explore");
+
+    // Stop the routine to clean up before the server shuts down.
+    let _ = request(
+        &mut reader,
+        r#"{"id":"rtn3","method":"stop_routine","params":{}}"#,
+    )
+    .await;
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_stop_routine_not_running() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // Stop without starting — must return INVALID_PARAMS.
+    let resp = request(
+        &mut reader,
+        r#"{"id":"rtn4","method":"stop_routine","params":{}}"#,
+    )
+    .await;
+
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "INVALID_PARAMS");
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_start_routine_already_running() {
+    let (config, shutdown_tx, handle, _dir) = start_test_server().await;
+
+    let stream = UnixStream::connect(&config.socket_path).await.unwrap();
+    let mut reader = BufReader::new(stream);
+
+    // First start — must succeed.
+    let resp1 = request(
+        &mut reader,
+        r#"{"id":"rtn5","method":"start_routine","params":{"name":"explore","max_duration_s":1}}"#,
+    )
+    .await;
+    assert_eq!(resp1["ok"], true);
+
+    // Second start while already running — must return ALREADY_RUNNING.
+    let resp2 = request(
+        &mut reader,
+        r#"{"id":"rtn6","method":"start_routine","params":{"name":"explore"}}"#,
+    )
+    .await;
+
+    assert_eq!(resp2["ok"], false);
+    assert_eq!(resp2["error"]["code"], "ALREADY_RUNNING");
+
+    // Stop to clean up.
+    let _ = request(
+        &mut reader,
+        r#"{"id":"rtn7","method":"stop_routine","params":{}}"#,
+    )
+    .await;
+
+    let _ = shutdown_tx.send(true);
+    drop(reader);
+    let _ = handle.await;
+}
