@@ -115,7 +115,18 @@ pub async fn explore_task(
                 90.0 + params.avoidance_turn_angle_deg,
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            drive_all(
+                &hat,
+                &gpio,
+                &config,
+                &calibration,
+                &motor_lease_manager,
+                motor_lease_ttl_ms,
+                params.speed_pct,
+            )
+            .await;
+            tokio::time::sleep(params.avoidance_backup).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
             steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
         }
@@ -144,7 +155,18 @@ pub async fn explore_task(
                 90.0 + params.avoidance_turn_angle_deg,
             )
             .await;
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            drive_all(
+                &hat,
+                &gpio,
+                &config,
+                &calibration,
+                &motor_lease_manager,
+                motor_lease_ttl_ms,
+                params.speed_pct,
+            )
+            .await;
+            tokio::time::sleep(params.avoidance_backup).await;
+            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
             steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
         }
