@@ -1122,11 +1122,7 @@ impl Handler {
                 return Response::err(request.id.clone(), "INVALID_PARAMS", "servo is required");
             }
         };
-        let trim_us = match request
-            .params
-            .get("trim_us")
-            .and_then(|v| v.as_i64())
-        {
+        let trim_us = match request.params.get("trim_us").and_then(|v| v.as_i64()) {
             Some(v) if (-500..=500).contains(&v) => v as i16,
             Some(_) => {
                 return Response::err(
@@ -1397,9 +1393,9 @@ impl Handler {
             cliff_threshold_normalized,
             max_duration_s,
         ) {
-            Ok(uptime) => Response::ok(
+            Ok(()) => Response::ok(
                 request.id.clone(),
-                json!({ "name": name, "started_at_unix_s": uptime }),
+                json!({ "name": name, "started_at_uptime_s": self.start_time.elapsed().as_secs() }),
             ),
             Err("ALREADY_RUNNING") => Response::err(
                 request.id.clone(),
@@ -1436,25 +1432,29 @@ impl Handler {
         stop_flag.store(true, Ordering::Relaxed);
         let ran_for_s = started_at.elapsed().as_secs();
 
-        let (stats, stop_reason) =
-            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => (crate::routine::RoutineStats::default(), "error".to_string()),
-                Err(_timeout) => {
-                    // Timed out — abort the detached task and idle motors.
-                    handle.abort();
-                    let _ = handle.await;
-                    for cfg in &self.config.motors {
-                        if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
-                            error!(error = %e, pwm_channel = cfg.pwm_channel, "stop_routine: SAFETY: failed to idle motor after task abort");
-                        }
+        let (stats, stop_reason) = match tokio::time::timeout(Duration::from_secs(2), &mut handle)
+            .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => (crate::routine::RoutineStats::default(), "error".to_string()),
+            Err(_timeout) => {
+                // Timed out — abort the detached task and idle motors.
+                handle.abort();
+                let _ = handle.await;
+                for cfg in &self.config.motors {
+                    if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                        error!(error = %e, pwm_channel = cfg.pwm_channel, "stop_routine: SAFETY: failed to idle motor after task abort");
                     }
-                    self.motor_lease_manager
-                        .release_connection(crate::routine::ROUTINE_CONN_ID)
-                        .await;
-                    (crate::routine::RoutineStats::default(), "timeout_abort".to_string())
                 }
-            };
+                self.motor_lease_manager
+                    .release_connection(crate::routine::ROUTINE_CONN_ID)
+                    .await;
+                (
+                    crate::routine::RoutineStats::default(),
+                    "timeout_abort".to_string(),
+                )
+            }
+        };
 
         Response::ok(
             request.id.clone(),
@@ -2747,7 +2747,7 @@ mod tests {
             serde_json::from_str(&handler.dispatch(raw, 0).await).unwrap();
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["name"], "explore");
-        assert!(resp["result"]["started_at_unix_s"].is_number());
+        assert!(resp["result"]["started_at_uptime_s"].is_number());
     }
 
     #[tokio::test]

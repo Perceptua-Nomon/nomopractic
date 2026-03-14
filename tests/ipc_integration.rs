@@ -142,18 +142,14 @@ async fn start_test_server_with_adc(
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
     let alsa: Arc<dyn AlsaControl> = Arc::new(MockAlsaControl::new());
 
-    let handler = Arc::new(Handler::with_alsa(
-        Arc::clone(&config),
-        hat,
-        gpio,
-        alsa,
-    ));
+    let handler = Arc::new(Handler::with_alsa(Arc::clone(&config), hat, gpio, alsa));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let handle = tokio::spawn(async move {
-        nomopractic::ipc::serve_with_handler(handler, shutdown_rx).await
-    });
+    let handle =
+        tokio::spawn(
+            async move { nomopractic::ipc::serve_with_handler(handler, shutdown_rx).await },
+        );
 
     // Give the listener a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

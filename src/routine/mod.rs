@@ -21,6 +21,14 @@ use crate::hat::servo::LeaseManager;
 /// Pseudo-connection ID for routine-owned motor leases (never a real client ID).
 pub const ROUTINE_CONN_ID: u64 = 0;
 
+/// Data extracted from an active routine by `take_active`.
+pub type ActiveRoutineData = (
+    String,
+    Instant,
+    Arc<AtomicBool>,
+    JoinHandle<(RoutineStats, String)>,
+);
+
 /// Runtime state of the routine engine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoutineState {
@@ -99,7 +107,7 @@ impl RoutineEngine {
 
     /// Start the named routine, optionally overriding config defaults.
     ///
-    /// Returns the Unix epoch seconds at task spawn on success.
+    /// Returns `Ok(())` on success.
     /// Returns `"ALREADY_RUNNING"` if a routine is active.
     /// Returns `"INVALID_PARAMS"` if the name is not recognised.
     pub fn start(
@@ -109,7 +117,7 @@ impl RoutineEngine {
         obstacle_threshold_cm: Option<f64>,
         cliff_threshold_normalized: Option<f64>,
         max_duration_s: Option<u64>,
-    ) -> Result<u64, &'static str> {
+    ) -> Result<(), &'static str> {
         if self.active.is_some() {
             return Err("ALREADY_RUNNING");
         }
@@ -154,10 +162,6 @@ impl RoutineEngine {
         });
 
         let started_at = Instant::now();
-        let started_at_unix_s = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
 
         self.active = Some(ActiveRoutine {
             name: name.to_string(),
@@ -166,7 +170,7 @@ impl RoutineEngine {
             handle,
         });
 
-        Ok(started_at_unix_s)
+        Ok(())
     }
 
     /// Extract the active routine for stopping outside the engine lock.
@@ -174,9 +178,7 @@ impl RoutineEngine {
     /// Returns `None` if no routine is running.  The caller is responsible for
     /// signalling `stop_flag`, waiting for the handle, and idling motors on
     /// timeout/abort.
-    pub fn take_active(
-        &mut self,
-    ) -> Option<(String, Instant, Arc<AtomicBool>, JoinHandle<(RoutineStats, String)>)> {
+    pub fn take_active(&mut self) -> Option<ActiveRoutineData> {
         self.active
             .take()
             .map(|a| (a.name, a.started_at, a.stop_flag, a.handle))

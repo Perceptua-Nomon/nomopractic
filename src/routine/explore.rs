@@ -108,8 +108,13 @@ pub async fn explore_task(
             .await;
             tokio::time::sleep(params.avoidance_backup).await;
             stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            steer_channel(&hat, &config, &calibration, 90.0 + params.avoidance_turn_angle_deg)
-                .await;
+            steer_channel(
+                &hat,
+                &config,
+                &calibration,
+                90.0 + params.avoidance_turn_angle_deg,
+            )
+            .await;
             tokio::time::sleep(Duration::from_millis(400)).await;
             steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
@@ -132,8 +137,13 @@ pub async fn explore_task(
             .await;
             tokio::time::sleep(params.avoidance_backup).await;
             stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            steer_channel(&hat, &config, &calibration, 90.0 + params.avoidance_turn_angle_deg)
-                .await;
+            steer_channel(
+                &hat,
+                &config,
+                &calibration,
+                90.0 + params.avoidance_turn_angle_deg,
+            )
+            .await;
             tokio::time::sleep(Duration::from_millis(400)).await;
             steer_channel(&hat, &config, &calibration, 90.0).await;
             continue;
@@ -161,11 +171,7 @@ pub async fn explore_task(
 // ---------------------------------------------------------------------------
 
 /// Stop all configured motors and revoke their leases (best-effort).
-async fn stop_motors_and_revoke(
-    hat: &Hat,
-    config: &Config,
-    motor_lease_manager: &LeaseManager,
-) {
+async fn stop_motors_and_revoke(hat: &Hat, config: &Config, motor_lease_manager: &LeaseManager) {
     for cfg in &config.motors {
         if let Err(e) = motor::idle_motor(hat, cfg.pwm_channel).await {
             warn!(error = %e, pwm_channel = cfg.pwm_channel, "explore: stop_motors failed");
@@ -246,11 +252,7 @@ async fn steer_channel(
     // Read steering trim; drop lock before hardware call.
     let trim_us: i16 = {
         let guard = calibration.lock().await;
-        guard
-            .servos
-            .get("steering")
-            .map(|s| s.trim_us)
-            .unwrap_or(0)
+        guard.servos.get("steering").map(|s| s.trim_us).unwrap_or(0)
     };
     let angle_clamped = angle_deg.clamp(0.0, 180.0);
     let raw_pulse = servo_hat::angle_to_pulse_us(angle_clamped);
