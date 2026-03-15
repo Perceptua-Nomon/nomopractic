@@ -114,16 +114,16 @@ impl AlsaControl for AmixerControl {
         }
         cmd.args(["get", &self.output_control]);
         let out = cmd.output()?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                let available = Self::available_controls(self.output_card_index);
-                return Err(AudioError::Command(format!(
-                    "{stderr}Available controls on card {}: {available}",
-                    self.output_card_index
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "(default)".to_string())
-                )));
-            }
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.output_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.output_card_index
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "(default)".to_string())
+            )));
+        }
         Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
     }
 
@@ -135,16 +135,16 @@ impl AlsaControl for AmixerControl {
         }
         cmd.args(["sset", &self.output_control, &pct_arg]);
         let out = cmd.output()?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                let available = Self::available_controls(self.output_card_index);
-                return Err(AudioError::Command(format!(
-                    "{stderr}Available controls on card {}: {available}",
-                    self.output_card_index
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "(default)".to_string())
-                )));
-            }
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.output_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.output_card_index
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "(default)".to_string())
+            )));
+        }
         Ok(())
     }
 
@@ -156,15 +156,15 @@ impl AlsaControl for AmixerControl {
         cmd.args(["get", &self.input_control]);
         let out = cmd.output()?;
         if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                let available = Self::available_controls(self.input_card_index);
-                return Err(AudioError::Command(format!(
-                    "{stderr}Available controls on card {}: {available}",
-                    self.input_card_index
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "(default)".to_string())
-                )));
-            }
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.input_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.input_card_index
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "(default)".to_string())
+            )));
+        }
         Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
     }
 
@@ -177,15 +177,15 @@ impl AlsaControl for AmixerControl {
         cmd.args(["sset", &self.input_control, &pct_arg]);
         let out = cmd.output()?;
         if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-                let available = Self::available_controls(self.input_card_index);
-                return Err(AudioError::Command(format!(
-                    "{stderr}Available controls on card {}: {available}",
-                    self.input_card_index
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "(default)".to_string())
-                )));
-            }
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(self.input_card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                self.input_card_index
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "(default)".to_string())
+            )));
+        }
         Ok(())
     }
 }
