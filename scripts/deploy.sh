@@ -1,33 +1,45 @@
 #!/usr/bin/env bash
-# deploy.sh — Download, verify, atomically install, and restart nomopractic.
+# deploy.sh — Build locally or download from GitHub, verify, atomically install, and restart nomopractic.
 #
 # Usage:
-#   ./scripts/deploy.sh [<version>] [<pi-host>]
+#   ./scripts/deploy.sh [--local] [<version>] [<pi-host>]
 #
 # Arguments:
+#   --local   Build and deploy the current local code (aarch64 cross-compile).
+#             Bypasses GitHub release downloads.
 #   version   Git tag to deploy, e.g. "v0.2.0". If omitted, the script fetches
-#             and deploys the latest release from GitHub.
+#             and deploys the latest release from GitHub. Ignored if --local.
 #   pi-host   SSH host (user@host or plain hostname). Defaults to
 #             NOMON_PI_HOST env var. If empty, runs locally on the Pi.
 #
 # Environment:
-#   NOMON_PI_HOST       SSH target (overridden by second arg)
+#   NOMON_PI_HOST       SSH target (overridden by pi-host arg)
 #   NOMON_SSH_KEY       Path to SSH private key (optional)
 #   NOMON_GITHUB_REPO   GitHub "owner/repo" slug. Default: Perceptua-Nomon/nomopractic
 #
 # Examples:
+#   # Deploy local code from a dev machine to a Pi over SSH:
+#   ./scripts/deploy.sh --local pi@raspberrypi.local
+#
 #   # Deploy latest release from a dev machine to a Pi over SSH:
 #   ./scripts/deploy.sh pi@raspberrypi.local
 #
 #   # Deploy a specific version from a dev machine to a Pi over SSH:
 #   ./scripts/deploy.sh v0.2.0 pi@raspberrypi.local
 #
-#   # Deploy directly on the Pi (scp the script first):
-#   ./scripts/deploy.sh v0.2.0
+#   # Deploy local code directly on the Pi (scp the script first):
+#   ./scripts/deploy.sh --local
 #
-# The script:
+# The script (release mode):
 #   1. Downloads the binary + SHA-256 checksum from GitHub Releases.
 #   2. Verifies the checksum.
+#   3. Atomically replaces /usr/local/bin/nomopractic (keeps previous as .bak).
+#   4. Restarts nomopractic.service.
+#   5. Verifies the service is running (waits up to 10 s).
+#
+# The script (--local mode):
+#   1. Cross-compiles the current local code for aarch64 (if not already built).
+#   2. Copies the binary to the Pi.
 #   3. Atomically replaces /usr/local/bin/nomopractic (keeps previous as .bak).
 #   4. Restarts nomopractic.service.
 #   5. Verifies the service is running (waits up to 10 s).
@@ -39,7 +51,7 @@
 # Exit codes:
 #   0  success
 #   1  usage error
-#   2  download / checksum failure
+#   2  download / checksum / build failure
 #   3  installation / service failure
 
 set -euo pipefail
@@ -58,25 +70,95 @@ trap cleanup EXIT
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
+BUILD_LOCAL=false
 VERSION="${1:-}"
 PI_HOST="${2:-${NOMON_PI_HOST:-}}"
+
+# Check if first argument is --local flag
+if [[ "${VERSION}" == "--local" ]]; then
+    BUILD_LOCAL=true
+    VERSION=""
+    PI_HOST="${2:-${NOMON_PI_HOST:-}}"
+fi
 
 if [[ -n "${VERSION}" && ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Error: version must start with 'v' followed by semver (e.g. v0.2.0)" >&2
     exit 1
 fi
 
-# ── Resolve version ───────────────────────────────────────────────────────────
+# ── Resolve version / Build ──────────────────────────────────────────────────
 
-if [[ -z "${VERSION}" ]]; then
-    echo "==> Resolving latest release from GitHub..."
-    VERSION="$(curl -sf "https://api.github.com/repos/${REPO}/releases/latest" \
-        | python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])')"
+if [[ "${BUILD_LOCAL}" == true ]]; then
+    # Get version from Cargo.toml
+    VERSION="$(grep -m1 'version' Cargo.toml | sed -E 's/.*version\s*=\s*"([^"]+)".*/\1/')"
     if [[ -z "${VERSION}" ]]; then
-        echo "Error: could not determine latest release from GitHub." >&2
-        exit 1
+        echo "Error: could not determine version from Cargo.toml" >&2
+        exit 2
     fi
-    echo "  Latest release: ${VERSION}"
+    echo "==> Building nomopractic ${VERSION} locally for aarch64..."
+    
+    # Cross-compile for aarch64
+    if ! command -v cross &> /dev/null; then
+        echo "Error: 'cross' command not found. Install it with: cargo install cross" >&2
+        exit 2
+    fi
+    
+    if ! cross build --target aarch64-unknown-linux-gnu --release; then
+        echo "Error: cross-compilation failed" >&2
+        exit 2
+    fi
+    
+    BINARY_FILE="target/aarch64-unknown-linux-gnu/release/nomopractic"
+    if [[ ! -f "${BINARY_FILE}" ]]; then
+        echo "Error: compiled binary not found at ${BINARY_FILE}" >&2
+        exit 2
+    fi
+    
+    DISPLAY_VERSION="${VERSION}"
+else
+    # ── Resolve version ───────────────────────────────────────────────────────
+
+    if [[ -z "${VERSION}" ]]; then
+        echo "==> Resolving latest release from GitHub..."
+        VERSION="$(curl -sf "https://api.github.com/repos/${REPO}/releases/latest" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])')"
+        if [[ -z "${VERSION}" ]]; then
+            echo "Error: could not determine latest release from GitHub." >&2
+            exit 1
+        fi
+        echo "  Latest release: ${VERSION}"
+    fi
+
+    # ── Download ─────────────────────────────────────────────────────────────
+
+    BINARY_NAME="nomopractic-${VERSION}-aarch64-linux"
+    BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+    BINARY_URL="${BASE_URL}/${BINARY_NAME}"
+    SHA256_URL="${BASE_URL}/${BINARY_NAME}.sha256"
+
+    BINARY_FILE="${DOWNLOAD_DIR}/${BINARY_NAME}"
+    SHA256_FILE="${DOWNLOAD_DIR}/${BINARY_NAME}.sha256"
+
+    echo "==> Downloading nomopractic ${VERSION} from GitHub Releases..."
+    curl --fail --location --progress-bar --output "$BINARY_FILE" "$BINARY_URL"
+    curl --fail --location --silent     --output "$SHA256_FILE" "$SHA256_URL"
+
+    # ── Checksum verification ─────────────────────────────────────────────────
+
+    echo "==> Verifying SHA-256 checksum..."
+    (
+        cd "$DOWNLOAD_DIR"
+        # The .sha256 file may contain the full path; normalise to just the filename.
+        EXPECTED="$(awk '{print $1}' "$SHA256_FILE")  ${BINARY_NAME}"
+        echo "$EXPECTED" | sha256sum --check --status || {
+            echo "Error: checksum mismatch for ${BINARY_FILE}" >&2
+            exit 2
+        }
+    )
+    echo "    OK: checksum verified"
+
+    chmod +x "$BINARY_FILE"
+    DISPLAY_VERSION="${VERSION}"
 fi
 
 # ── SSH helper ───────────────────────────────────────────────────────────────
@@ -95,36 +177,6 @@ else
     _rscp() { cp "$1" "$2"; }  # local "scp" = cp
     ON_REMOTE=false
 fi
-
-# ── Download ─────────────────────────────────────────────────────────────────
-
-BINARY_NAME="nomopractic-${VERSION}-aarch64-linux"
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
-BINARY_URL="${BASE_URL}/${BINARY_NAME}"
-SHA256_URL="${BASE_URL}/${BINARY_NAME}.sha256"
-
-BINARY_FILE="${DOWNLOAD_DIR}/${BINARY_NAME}"
-SHA256_FILE="${DOWNLOAD_DIR}/${BINARY_NAME}.sha256"
-
-echo "==> Downloading nomopractic ${VERSION} from GitHub Releases..."
-curl --fail --location --progress-bar --output "$BINARY_FILE" "$BINARY_URL"
-curl --fail --location --silent     --output "$SHA256_FILE" "$SHA256_URL"
-
-# ── Checksum verification ─────────────────────────────────────────────────────
-
-echo "==> Verifying SHA-256 checksum..."
-(
-    cd "$DOWNLOAD_DIR"
-    # The .sha256 file may contain the full path; normalise to just the filename.
-    EXPECTED="$(awk '{print $1}' "$SHA256_FILE")  ${BINARY_NAME}"
-    echo "$EXPECTED" | sha256sum --check --status || {
-        echo "Error: checksum mismatch for ${BINARY_FILE}" >&2
-        exit 2
-    }
-)
-echo "    OK: checksum verified"
-
-chmod +x "$BINARY_FILE"
 
 # ── Remote or local installation ─────────────────────────────────────────────
 
@@ -152,11 +204,18 @@ if [[ "$ON_REMOTE" == true ]]; then
     # Copy the verified binary to the Pi and run the install+restart there.
     REMOTE_TMP="/tmp/nomopractic.$$"
     _rscp "$BINARY_FILE" "${PI_HOST}:${REMOTE_TMP}"
+    # If a local config.toml exists, upload it to the Pi for installation
+    REMOTE_CONFIG_TMP=""
+    if [[ -f "config.toml" ]]; then
+        REMOTE_CONFIG_TMP="/tmp/nomopractic_config.$$"
+        _rscp "config.toml" "${PI_HOST}:${REMOTE_CONFIG_TMP}"
+    fi
     _rsh bash <<REMOTE
 set -euo pipefail
 INSTALL_PATH="${INSTALL_PATH}"
 SERVICE="${SERVICE}"
 REMOTE_TMP="${REMOTE_TMP}"
+REMOTE_CONFIG_TMP="${REMOTE_CONFIG_TMP}"
 
 if [[ -f "\${INSTALL_PATH}" ]]; then
     sudo cp "\${INSTALL_PATH}" "\${INSTALL_PATH}.bak"
@@ -170,6 +229,19 @@ sudo mv -f "\${tmp}" "\${INSTALL_PATH}"
 rm -f "\${REMOTE_TMP}"
 echo "==> Installed to \${INSTALL_PATH}"
 
+# If a config was uploaded, atomically install it to /etc/nomopractic
+if [[ -n "\${REMOTE_CONFIG_TMP}" ]]; then
+    echo "==> Installing config to /etc/nomopractic/config.toml..."
+    sudo mkdir -p /etc/nomopractic
+    if [[ -f /etc/nomopractic/config.toml ]]; then
+        sudo cp /etc/nomopractic/config.toml /etc/nomopractic/config.toml.bak
+        echo "==> Previous config saved to /etc/nomopractic/config.toml.bak"
+    fi
+    sudo mv -f "\${REMOTE_CONFIG_TMP}" /etc/nomopractic/config.toml
+    sudo chmod 644 /etc/nomopractic/config.toml
+    echo "==> Installed config to /etc/nomopractic/config.toml"
+fi
+
 echo "==> Restarting \${SERVICE}.service..."
 sudo systemctl daemon-reload
 sudo systemctl restart "\${SERVICE}"
@@ -178,7 +250,7 @@ sudo systemctl enable  "\${SERVICE}"
 echo "==> Waiting for service to become active..."
 for i in \$(seq 1 10); do
     if systemctl is-active --quiet "\${SERVICE}"; then
-        echo "==> \${SERVICE} is running (version ${VERSION})"
+        echo "==> \${SERVICE} is running (version ${DISPLAY_VERSION})"
         exit 0
     fi
     sleep 1
@@ -193,6 +265,19 @@ else
     # Local install (running on the Pi directly).
     install_binary "$BINARY_FILE"
 
+    # If a local config.toml exists, install it to /etc/nomopractic
+    if [[ -f "config.toml" ]]; then
+        echo "==> Installing local config to /etc/nomopractic/config.toml..."
+        sudo mkdir -p /etc/nomopractic
+        if [[ -f /etc/nomopractic/config.toml ]]; then
+            sudo cp /etc/nomopractic/config.toml /etc/nomopractic/config.toml.bak
+            echo "==> Previous config saved to /etc/nomopractic/config.toml.bak"
+        fi
+        sudo cp config.toml /etc/nomopractic/config.toml
+        sudo chmod 644 /etc/nomopractic/config.toml
+        echo "==> Installed config to /etc/nomopractic/config.toml"
+    fi
+
     echo "==> Restarting ${SERVICE}.service..."
     sudo systemctl daemon-reload
     sudo systemctl restart "${SERVICE}"
@@ -201,7 +286,7 @@ else
     echo "==> Waiting for service to become active..."
     for i in $(seq 1 10); do
         if systemctl is-active --quiet "${SERVICE}"; then
-            echo "==> ${SERVICE} is running (version ${VERSION})"
+            echo "==> ${SERVICE} is running (version ${DISPLAY_VERSION})"
             exit 0
         fi
         sleep 1

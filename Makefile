@@ -1,7 +1,7 @@
 VERSION ?=
 PI_HOST ?=
 
-.PHONY: build test lint format check clean release deploy coverage
+.PHONY: build test lint format check clean release deploy deploy-local coverage
 
 build:
 	cargo build
@@ -31,3 +31,6 @@ release:
 
 deploy:
 	./scripts/deploy.sh $(VERSION) $(PI_HOST)
+
+deploy-local:
+	./scripts/deploy.sh --local $(PI_HOST)
