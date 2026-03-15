@@ -87,23 +87,23 @@ impl Default for SensorChannels {
 /// card 2.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AudioConfig {
-    /// ALSA card index for the HifiBerry DAC output (default: 1).
-    pub output_card_index: u8,
-    /// ALSA mixer control name for output volume (default: "Digital").
+    /// ALSA card index for the HifiBerry DAC output (default: None).
+    pub output_card_index: Option<u8>,
+    /// ALSA mixer control name for output volume (default: "Master").
     pub output_control: String,
-    /// ALSA card index for the USB microphone input (default: 2).
-    pub input_card_index: u8,
-    /// ALSA mixer control name for microphone capture gain (default: "Mic Capture").
+    /// ALSA card index for the USB microphone input (default: Some(2)).
+    pub input_card_index: Option<u8>,
+    /// ALSA mixer control name for microphone capture gain (default: "Mic").
     pub input_control: String,
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            output_card_index: 1,
-            output_control: "Digital".into(),
-            input_card_index: 2,
-            input_control: "Mic Capture".into(),
+            output_card_index: None,
+            output_control: "Master".into(),
+            input_card_index: Some(2),
+            input_control: "Mic".into(),
         }
     }
 }
