@@ -43,11 +43,11 @@ pub trait AlsaControl: Send + Sync {
 #[derive(Debug)]
 pub struct AmixerControl {
     /// ALSA card index for audio output (HifiBerry DAC), e.g. 1.
-    pub(crate) output_card_index: u8,
+    pub(crate) output_card_index: Option<u8>,
     /// ALSA mixer control name for output volume, e.g. `"Digital"`.
     pub(crate) output_control: String,
     /// ALSA card index for audio input (USB mic PCM2902), e.g. 2.
-    pub(crate) input_card_index: u8,
+    pub(crate) input_card_index: Option<u8>,
     /// ALSA mixer control name for microphone capture gain, e.g. `"Mic Capture"`.
     pub(crate) input_control: String,
 }
@@ -59,16 +59,22 @@ impl AmixerControl {
     /// single line summary.  Used to enrich error messages when a configured
     /// control name is not found, so the caller can immediately see what names
     /// are valid on their hardware.
-    fn available_controls(card_index: u8) -> String {
-        match Command::new("amixer")
-            .args(["-c", &card_index.to_string(), "scontrols"])
-            .output()
-        {
+    fn available_controls(card_index: Option<u8>) -> String {
+        let mut cmd = Command::new("amixer");
+        if let Some(idx) = card_index {
+            cmd.args(["-c", &idx.to_string(), "scontrols"]);
+        } else {
+            cmd.args(["scontrols"]);
+        }
+        match cmd.output() {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
                 let names: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
                 if names.is_empty() {
-                    format!("(no controls found on card {card_index})")
+                    match card_index {
+                        Some(i) => format!("(no controls found on card {i})"),
+                        None => "(no controls found on default card)".to_string(),
+                    }
                 } else {
                     names.join(", ")
                 }
@@ -102,86 +108,84 @@ impl AmixerControl {
 
 impl AlsaControl for AmixerControl {
     fn get_volume_pct(&self) -> Result<u8, AudioError> {
-        let out = Command::new("amixer")
-            .args([
-                "-c",
-                &self.output_card_index.to_string(),
-                "get",
-                &self.output_control,
-            ])
-            .output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.output_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.output_card_index
-            )));
+        let mut cmd = Command::new("amixer");
+        if let Some(idx) = self.output_card_index {
+            cmd.args(["-c", &idx.to_string()]);
         }
+        cmd.args(["get", &self.output_control]);
+        let out = cmd.output()?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                let available = Self::available_controls(self.output_card_index);
+                return Err(AudioError::Command(format!(
+                    "{stderr}Available controls on card {}: {available}",
+                    self.output_card_index
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "(default)".to_string())
+                )));
+            }
         Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
     }
 
     fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
         let pct_arg = format!("{pct}%");
-        let out = Command::new("amixer")
-            .args([
-                "-c",
-                &self.output_card_index.to_string(),
-                "sset",
-                &self.output_control,
-                &pct_arg,
-            ])
-            .output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.output_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.output_card_index
-            )));
+        let mut cmd = Command::new("amixer");
+        if let Some(idx) = self.output_card_index {
+            cmd.args(["-c", &idx.to_string()]);
         }
+        cmd.args(["sset", &self.output_control, &pct_arg]);
+        let out = cmd.output()?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                let available = Self::available_controls(self.output_card_index);
+                return Err(AudioError::Command(format!(
+                    "{stderr}Available controls on card {}: {available}",
+                    self.output_card_index
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "(default)".to_string())
+                )));
+            }
         Ok(())
     }
 
     fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
-        let out = Command::new("amixer")
-            .args([
-                "-c",
-                &self.input_card_index.to_string(),
-                "get",
-                &self.input_control,
-            ])
-            .output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.input_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.input_card_index
-            )));
+        let mut cmd = Command::new("amixer");
+        if let Some(idx) = self.input_card_index {
+            cmd.args(["-c", &idx.to_string()]);
         }
+        cmd.args(["get", &self.input_control]);
+        let out = cmd.output()?;
+        if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                let available = Self::available_controls(self.input_card_index);
+                return Err(AudioError::Command(format!(
+                    "{stderr}Available controls on card {}: {available}",
+                    self.input_card_index
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "(default)".to_string())
+                )));
+            }
         Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
     }
 
     fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
         let pct_arg = format!("{pct}%");
-        let out = Command::new("amixer")
-            .args([
-                "-c",
-                &self.input_card_index.to_string(),
-                "sset",
-                &self.input_control,
-                &pct_arg,
-            ])
-            .output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.input_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.input_card_index
-            )));
+        let mut cmd = Command::new("amixer");
+        if let Some(idx) = self.input_card_index {
+            cmd.args(["-c", &idx.to_string()]);
         }
+        cmd.args(["sset", &self.input_control, &pct_arg]);
+        let out = cmd.output()?;
+        if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                let available = Self::available_controls(self.input_card_index);
+                return Err(AudioError::Command(format!(
+                    "{stderr}Available controls on card {}: {available}",
+                    self.input_card_index
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "(default)".to_string())
+                )));
+            }
         Ok(())
     }
 }
