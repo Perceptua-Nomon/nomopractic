@@ -1,3 +1,4 @@
+pub mod ble;
 pub mod calibration;
 pub mod config;
 pub mod hat;

@@ -360,6 +360,7 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 10 | Calibration & Configuration | ✅ Complete | 206 |
 | 11 | Routine Engine | ✅ Complete | 222 |
 | 12 | Line-Following Routine | 🔲 Planned | — |
+| 13 | BLE GATT Server | ✅ Complete | 258 |
 
 ---
 
@@ -645,3 +646,158 @@ proportional-derivative (PD) steering controller.
 - [ ] Robot follows a dark line on a light surface autonomously
 - [ ] Stops cleanly when line is lost for > `line_lost_cycles` iterations
 - [ ] All tests pass without hardware
+
+---
+
+### Phase 13 — BLE GATT Server (P1)
+
+**Goal**: Expose a BLE GATT server from the nomopractic daemon so mobile
+clients can discover, pair with, and send basic commands to the robot without
+WiFi connectivity. All BLE commands bridge to the existing IPC handler —
+no hardware logic is duplicated.
+
+**Architecture decisions:**
+- ADR-001: BLE GATT server in nomopractic
+- ADR-002: Binary protocol for BLE GATT
+- ADR-003: BLE security model
+
+**Cross-repo dependencies:**
+- nomothetic Phase 18: shared pairing secret, BlueZ prerequisites
+- nomotactic Phase 2: BLE client implementation
+
+**Hardware:** BCM43436s (Pi Zero 2W) — BLE 4.2, shared antenna with WiFi.
+Practical indoor range: 10–30 m. BLE MTU: 20–244 bytes (negotiated).
+
+#### 13.1 — BLE Infrastructure
+- [x] Add `bluer` crate (BlueZ D-Bus bindings) behind `ble` Cargo feature flag
+- [x] Add crypto crates: `jsonwebtoken`, `hkdf`, `sha2`, `aes`, `ccm`
+      behind same `ble` feature flag
+- [x] `config.rs`: `BleConfig` struct:
+  - `enabled: bool` (default `false`)
+  - `device_name: String` (default `"nomon"`)
+  - `pairing_secret_path: PathBuf` (default `/var/lib/nomon/pairing_secret`)
+  - `jwt_secret_env: String` (default `NOMON_JWT_SECRET`)
+- [x] `[ble]` section in `config.toml`
+- [x] Validation: `device_name` length ≤ 29 bytes (BLE advertising limit)
+
+#### 13.2 — Binary Protocol Codec (`ble/protocol.rs`)
+- [x] Frame types: `BleRequest`, `BleResponse` with `opcode`, `seq_nr`,
+      `length`, `payload` fields
+- [x] Opcode enum: `Heartbeat(0x01)`, `GetBattery(0x02)`,
+      `SetMotorSpeed(0x03)`, `StopAllMotors(0x04)`, `SetServoAngle(0x05)`,
+      `Drive(0x06)`, `Steer(0x07)`, `ReadUltrasonic(0x08)`,
+      `ReadGrayscale(0x09)`, `GetHealth(0x0A)`
+- [x] Response opcodes: request opcode | 0x80; `Error = 0xFF`
+- [x] `encode_response(resp) -> Vec<u8>` and `decode_request(bytes) -> Result<BleRequest>`
+- [x] Fixed-point helpers: `speed_x100`, `angle_x10`, `voltage_mv`, `distance_x10`
+- [x] Little-endian throughout
+- [x] Unit tests: round-trip encode/decode for every opcode, boundary values,
+      truncated input, invalid opcode
+
+#### 13.3 — BLE GATT Service Definitions (`ble/services.rs`)
+- [x] Register GATT application via `bluer` with 4 services:
+
+**nomon Pairing Service** (`e3a10001-7b2a-4b9c-8f5a-2b7d6e4f1a3c`)
+
+| Characteristic | UUID | Properties | Description |
+|----------------|------|------------|-------------|
+| Pairing Secret | `e3a11001-…` | Write | Client writes pairing secret (UTF-8) |
+| Auth Token | `e3a11002-…` | Read, Notify | Server sends `salt (16B) \|\| JWT` after pairing |
+| Session State | `e3a11003-…` | Read, Notify | `0x00`=unpaired, `0x01`=paired, `0x02`=error |
+
+**nomon Command Service** (`e3a10002-7b2a-4b9c-8f5a-2b7d6e4f1a3c`)
+
+| Characteristic | UUID | Properties | Description |
+|----------------|------|------------|-------------|
+| Command Write | `e3a12001-…` | Write | Client writes binary command frame |
+| Command Response | `e3a12002-…` | Notify | Server sends binary response frame |
+
+**nomon WiFi Provisioning** (`e3a10003-7b2a-4b9c-8f5a-2b7d6e4f1a3c`)
+
+| Characteristic | UUID | Properties | Description |
+|----------------|------|------------|-------------|
+| WiFi Command | `e3a13001-…` | Write | `0x01`=scan, `0x02 \|\| ssid_len \|\| ssid \|\| pwd_len \|\| pwd`=connect, `0x03`=status |
+| WiFi Result | `e3a13002-…` | Read, Notify | Result type prefix + result payload |
+
+**nomon Status Service** (`e3a10004-7b2a-4b9c-8f5a-2b7d6e4f1a3c`)
+
+| Characteristic | UUID | Properties | Description |
+|----------------|------|------------|-------------|
+| Device State | `e3a14001-…` | Read, Notify | `0x00`=idle, `0x01`=driving, `0x02`=routine |
+| Battery Level | `e3a14004-…` | Read, Notify | `voltage_mv: u16 LE` (periodic notify) |
+
+- [x] BLE advertising with device name and Pairing Service UUID
+- [x] MTU negotiation (request 247 for 244-byte ATT payload)
+
+#### 13.4 — BLE Pairing & Session Auth (`ble/session.rs`)
+- [x] `BleSession` struct: `session_key: [u8; 16]`, `client_counter: u16`,
+      `server_counter: u16`, `paired: bool`, `jwt: String`
+- [x] `handle_pairing_write(secret_bytes)`: read pairing secret from
+      `config.ble.pairing_secret_path`, constant-time compare via
+      `hmac::digest::subtle::ConstantTimeEq`, single-use consumption
+- [x] On success: generate 16-byte random salt, derive `session_key` via
+      HKDF-SHA256 (`ikm=secret, salt=random_salt, info="nomon-ble-session"`,
+      `len=16`)
+- [x] Issue JWT (HS256) with claims `{sub:"device-owner@local",
+      iss:"nomon-device", exp:<now+24h>, iat:<now>}`
+- [x] Notify Auth Token: `salt(16) || jwt_bytes`
+- [x] Notify Session State: `0x01` (paired)
+- [x] `encrypt_response(plain, session) -> Vec<u8>`: AES-128-CCM encrypt,
+      increment `server_counter`
+- [x] `decrypt_command(cipher, session) -> Result<Vec<u8>>`: AES-128-CCM
+      decrypt, verify `client_counter > last_seen`, reject replay
+- [x] Session teardown on BLE disconnect
+- [x] Unit tests: pairing success/failure, key derivation determinism,
+      encrypt/decrypt round-trip, replay rejection, counter wrap
+
+#### 13.5 — BLE Command Bridge (`ble/bridge.rs`)
+- [x] `handle_ble_command(frame, handler, session) -> BleResponse`:
+  - If not paired and opcode ≠ health/status: return `NotAuthenticated`
+  - Decrypt frame payload using `session.decrypt_command()`
+  - Decode binary request via `protocol::decode_request()`
+  - Map BLE opcode → IPC method name + params JSON
+  - Call `handler.dispatch(method, params)` (reuse existing handler)
+  - Map IPC result JSON → binary response via `protocol::encode_response()`
+  - Encrypt response via `session.encrypt_response()`
+- [x] TTL lease: BLE commands use a dedicated `BLE_CONN_ID: u64 = 1`
+      (distinct from routine's `ROUTINE_CONN_ID = 0`)
+- [x] Unit tests: dispatch for each opcode, auth rejection, error mapping
+
+#### 13.6 — WiFi Provisioning (`ble/wifi.rs`)
+- [x] `scan_wifi() -> Vec<WifiNetwork>`: shell out to
+      `nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list` (same `Command` pattern
+      as `amixer` in `hat/audio.rs`)
+- [x] `connect_wifi(ssid, password) -> Result<(), WifiError>`: shell out to
+      `nmcli dev wifi connect <ssid> password <password>`
+- [x] `wifi_status() -> WifiState`: shell out to `nmcli -t -f STATE,DEVICE,CONNECTION general`
+- [x] `WifiState` enum: `Disconnected`, `Connecting`, `Connected { ssid, rssi_dbm }`
+- [x] `WifiError`: `ScanFailed`, `ConnectionFailed(String)`, `CommandFailed(String)`
+- [x] Notify WiFi Status characteristic on state changes
+- [x] Unit tests with mocked `Command` output (same pattern as `MockAlsaControl`)
+
+#### 13.7 — Connection Monitoring
+- [x] `ble/mod.rs`: detect BLE client disconnect via `bluer` events
+- [x] On disconnect: clear BLE session, idle all `BLE_CONN_ID` motor/servo
+      leases (same pattern as IPC client disconnect)
+- [x] Integrate with existing TTL watchdog — BLE motor commands carry `ttl_ms`,
+      watchdog idles on expiry
+- [x] Status Service: update Device State characteristic on state transitions
+- [x] Battery Level characteristic: periodic notify every 30 s (configurable)
+
+#### 13.8 — Startup & Lifecycle
+- [x] `main.rs`: if `config.ble.enabled`, spawn BLE GATT server task
+- [x] Graceful shutdown: deregister GATT application, stop advertising
+- [x] Log: `info!(device_name, "BLE GATT server started")`
+- [x] Log: `warn!` if BlueZ D-Bus connection fails (BLE disabled gracefully)
+
+#### Phase 13 Exit Criteria
+- [x] BLE GATT server advertises and accepts connections
+- [x] BLE pairing with secret verification + session key derivation works
+- [x] Motor, servo, sensor commands work over BLE with binary protocol
+- [x] WiFi credentials exchangeable over BLE; Pi connects to WiFi
+- [x] BLE disconnect idles all motors/servos with BLE leases
+- [x] AES-128-CCM encryption on all post-pairing command frames
+- [x] All tests pass without BlueZ (`ble` feature flag disabled in CI)
+- [x] `cargo test` — all existing + new tests pass
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean

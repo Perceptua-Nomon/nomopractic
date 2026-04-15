@@ -8,6 +8,7 @@ use nomopractic::config::Config;
 use nomopractic::hat::gpio::{HatGpio, RppalGpio};
 use nomopractic::hat::i2c::{Hat, RppalI2c};
 use nomopractic::hat::pwm;
+use nomopractic::ipc::handler::Handler;
 
 /// nomopractic — low-latency HAT hardware daemon for the nomon fleet.
 #[derive(Parser)]
@@ -81,5 +82,28 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    nomopractic::ipc::serve(config, hat, gpio, shutdown_rx).await
+    // Create the IPC handler that both IPC and BLE share.
+    let handler = Arc::new(Handler::new(Arc::clone(&config), Arc::clone(&hat), gpio));
+
+    // Optionally start the BLE GATT server if configured and compiled with
+    // the `ble` feature.
+    #[cfg(feature = "ble")]
+    if config.ble.enabled {
+        let ble_handler = Arc::clone(&handler);
+        let ble_shutdown = shutdown_rx.clone();
+        let ble_config = config.ble.clone();
+        info!(
+            device_name = %ble_config.device_name,
+            "BLE GATT server enabled, spawning"
+        );
+        tokio::spawn(async move {
+            if let Err(e) =
+                nomopractic::ble::start_ble_server(&ble_config, ble_handler, ble_shutdown).await
+            {
+                tracing::error!(error = %e, "BLE server error");
+            }
+        });
+    }
+
+    nomopractic::ipc::serve_with_handler(handler, shutdown_rx).await
 }
