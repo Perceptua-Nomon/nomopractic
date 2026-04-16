@@ -65,7 +65,8 @@ main.rs
   ├── ipc/
   │   ├── mod.rs          (Unix socket listener)
   │   ├── schema.rs       (NDJSON request/response types)
-  │   └── handler.rs      (method dispatch → HAT drivers)
+  │   ├── handler.rs      (method dispatch → HAT drivers)
+  │   └── params.rs       (typed IPC parameter extraction helpers)
   ├── hat/
   │   ├── mod.rs          (HAT abstraction, shared state)
   │   ├── i2c.rs          (rppal I2C read/write)
@@ -80,7 +81,15 @@ main.rs
   ├── routine/
   │   ├── mod.rs          (RoutineEngine, RoutineState, RoutineStats)
   │   └── explore.rs      (explore_task: ultrasonic + normalised grayscale sensor-actuator loop)
-  └── reset.rs            (MCU reset via BCM5)
+  ├── ble/                (BLE GATT server — behind `ble` Cargo feature flag)
+  │   ├── mod.rs          (GATT server lifecycle, advertising, connection events)
+  │   ├── protocol.rs     (binary frame codec: opcode/seq/length/payload)
+  │   ├── services.rs     (GATT service + characteristic registration)
+  │   ├── session.rs      (pairing, HKDF key derivation, AES-CCM encrypt/decrypt)
+  │   ├── bridge.rs       (BLE binary command → IPC handler dispatch)
+  │   └── wifi.rs         (WiFi provisioning: nmcli scan/connect/status)
+  ├── reset.rs            (MCU reset via BCM5)
+  └── testing.rs          (shared test mocks: MockI2c, MockGpio, MockAlsaControl — #[cfg(test)] only)
 ```
 
 ### Dependency Rules
@@ -90,6 +99,9 @@ main.rs
 3. `config.rs` has no internal dependencies.
 4. `reset.rs` uses `rppal::gpio` directly (BCM5 is not on HAT I2C).
 5. No module depends on `main.rs` — all logic is in `lib.rs`.
+6. `ble/` depends on `ipc/handler.rs` for command dispatch (same handler serves
+   both Unix socket IPC and BLE GATT commands).
+7. `ble/` modules depend only on `bluer` and RustCrypto crates; no `hat/` imports.
 
 ## Data Flow
 
@@ -182,6 +194,33 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `stop_routine` | — | `name`, `ran_for_s`, `obstacles_avoided`, `cliffs_avoided`, `stop_reason` |
 | `get_routine_status` | — | `running`, `name?`, `elapsed_s?`, `obstacles_avoided?`, `cliffs_avoided?` |
 
+### BLE Binary Protocol (Phase 13)
+
+BLE commands use a compact binary protocol over GATT characteristics instead
+of NDJSON. See ADR-002 for the full specification.
+
+**Transport:** BLE GATT characteristics (write + notify)
+**Framing:** 3-byte header (opcode, seq_nr, length) + payload
+**Encoding:** Little-endian, fixed-point scaled integers
+**Security:** AES-128-CCM encryption after pairing (see ADR-003)
+**Max frame:** 244 bytes (BLE 4.2 ATT MTU)
+
+The BLE binary opcode set maps 1:1 to a subset of the NDJSON IPC methods.
+The bridge layer (`ble/bridge.rs`) translates between the two encodings.
+
+| BLE Opcode | NDJSON Method | Direction |
+|------------|---------------|-----------|
+| `0x01` Heartbeat | `health` | req → resp |
+| `0x02` GetBattery | `get_battery_voltage` | req → resp |
+| `0x03` SetMotorSpeed | `set_motor_speed` | req → ack |
+| `0x04` StopAllMotors | `stop_all_motors` | req → ack |
+| `0x05` SetServoAngle | `set_servo_angle` | req → ack |
+| `0x06` Drive | `drive` | req → ack |
+| `0x07` Steer | `steer` | req → ack |
+| `0x08` ReadUltrasonic | `read_ultrasonic` | req → resp |
+| `0x09` ReadGrayscale | `read_grayscale` | req → resp |
+| `0x0A` GetHealth | `health` | req → resp |
+
 ### Error Codes
 
 | Code | Meaning |
@@ -220,6 +259,12 @@ See `config.toml` for all options.
 - Socket created with mode `0660`, group `nomon`.
 - Daemon runs as root (required for I2C/GPIO), socket restricted to `nomon` group.
 - No network listeners — Unix socket only (kernel-enforced access control).
+- BLE GATT server (Phase 13): app-layer authentication via pairing secret +
+  AES-128-CCM session encryption. See ADR-003 for the full security model.
+  - Pairing secret: single-use, constant-time compare.
+  - Session key: HKDF-SHA256 derived from pairing secret + random salt.
+  - All post-pairing BLE commands encrypted with AES-128-CCM.
+  - JWT issued over BLE is valid for HTTPS (shared secret with nomothetic).
 - Servo TTL lease prevents stall on client crash.
 - Input validation on all IPC parameters (channel range, pulse range, etc.).
 

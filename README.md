@@ -68,16 +68,32 @@ src/
 ├── ipc/
 │   ├── mod.rs       Unix socket listener
 │   ├── schema.rs    NDJSON request/response types
-│   └── handler.rs   Method dispatch → HAT drivers
+│   ├── handler.rs   Method dispatch → HAT drivers
+│   └── params.rs    Typed IPC parameter extraction
 ├── hat/
 │   ├── mod.rs       HAT abstraction
 │   ├── i2c.rs       I2C read/write helpers
 │   ├── pwm.rs       PWM register protocol
 │   ├── adc.rs       ADC reads
 │   ├── servo.rs     Servo control + TTL watchdog
+│   ├── motor.rs     DC motor speed/direction control
 │   ├── battery.rs   Battery voltage
-│   └── gpio.rs      Named GPIO pins
-└── reset.rs         MCU reset (BCM5)
+│   ├── gpio.rs      Named GPIO pins
+│   ├── ultrasonic.rs HC-SR04 distance sensor
+│   └── audio.rs     ALSA volume/gain control
+├── calibration.rs   Motor/servo/grayscale calibration store
+├── routine/
+│   ├── mod.rs       Routine engine (start/stop/status)
+│   └── explore.rs   Autonomous explore routine
+├── ble/             BLE GATT server (behind `ble` feature flag)
+│   ├── mod.rs       GATT server lifecycle, advertising
+│   ├── protocol.rs  Binary frame codec
+│   ├── services.rs  GATT service + characteristic registration
+│   ├── session.rs   Pairing, HKDF key derivation, AES-CCM
+│   ├── bridge.rs    BLE command → IPC handler dispatch
+│   └── wifi.rs      WiFi provisioning (nmcli)
+├── reset.rs         MCU reset (BCM5)
+└── testing.rs       Shared test mocks (MockI2c, MockGpio, MockAlsaControl)
 ```
 
 ## Documentation
