@@ -178,7 +178,7 @@ impl Default for LeaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hat::i2c::{HatError, I2cBus};
+    use crate::hat::i2c::HatError;
 
     // ------------------------------------------------------------------
     // Angle conversion
@@ -219,48 +219,39 @@ mod tests {
     // set_servo_pulse_us validation
     // ------------------------------------------------------------------
 
-    struct MockI2c;
-
-    impl I2cBus for MockI2c {
-        fn write_bytes(&mut self, _addr: u8, _data: &[u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-        fn read_bytes(&mut self, _addr: u8, _buf: &mut [u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-    }
+    use crate::testing::MockI2c;
 
     #[tokio::test]
     async fn set_servo_pulse_us_rejects_invalid_channel() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let err = set_servo_pulse_us(&hat, 12, 1500).await.unwrap_err();
         assert!(matches!(err, HatError::InvalidServoChannel(12)));
     }
 
     #[tokio::test]
     async fn set_servo_pulse_us_rejects_pulse_below_min() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let err = set_servo_pulse_us(&hat, 0, 499).await.unwrap_err();
         assert!(matches!(err, HatError::InvalidPulse(499)));
     }
 
     #[tokio::test]
     async fn set_servo_pulse_us_rejects_pulse_above_max() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let err = set_servo_pulse_us(&hat, 0, 2501).await.unwrap_err();
         assert!(matches!(err, HatError::InvalidPulse(2501)));
     }
 
     #[tokio::test]
     async fn set_servo_angle_rejects_angle_out_of_range() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let err = set_servo_angle(&hat, 0, 181.0).await.unwrap_err();
         assert!(matches!(err, HatError::InvalidAngle(_)));
     }
 
     #[tokio::test]
     async fn set_servo_angle_returns_computed_pulse_us() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let pulse = set_servo_angle(&hat, 0, 90.0).await.unwrap();
         assert_eq!(pulse, 1500);
     }

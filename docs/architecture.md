@@ -65,7 +65,8 @@ main.rs
   ├── ipc/
   │   ├── mod.rs          (Unix socket listener)
   │   ├── schema.rs       (NDJSON request/response types)
-  │   └── handler.rs      (method dispatch → HAT drivers)
+  │   ├── handler.rs      (method dispatch → HAT drivers)
+  │   └── params.rs       (typed IPC parameter extraction helpers)
   ├── hat/
   │   ├── mod.rs          (HAT abstraction, shared state)
   │   ├── i2c.rs          (rppal I2C read/write)
@@ -87,7 +88,8 @@ main.rs
   │   ├── session.rs      (pairing, HKDF key derivation, AES-CCM encrypt/decrypt)
   │   ├── bridge.rs       (BLE binary command → IPC handler dispatch)
   │   └── wifi.rs         (WiFi provisioning: nmcli scan/connect/status)
-  └── reset.rs            (MCU reset via BCM5)
+  ├── reset.rs            (MCU reset via BCM5)
+  └── testing.rs          (shared test mocks: MockI2c, MockGpio, MockAlsaControl — #[cfg(test)] only)
 ```
 
 ### Dependency Rules

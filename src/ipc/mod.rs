@@ -1,6 +1,7 @@
 // Unix domain socket listener — spawns a tokio task per client connection.
 
 pub mod handler;
+pub mod params;
 pub mod schema;
 
 use std::os::unix::fs::FileTypeExt;

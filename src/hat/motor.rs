@@ -71,48 +71,10 @@ pub async fn idle_motor(hat: &Hat, pwm_channel: u8) -> Result<(), HatError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
-    use crate::hat::gpio::{GpioBus, GpioError, HatGpio};
-    use crate::hat::i2c::{HatError, I2cBus};
-
-    // ------------------------------------------------------------------
-    // Mock helpers
-    // ------------------------------------------------------------------
-
-    struct MockI2c;
-
-    impl I2cBus for MockI2c {
-        fn write_bytes(&mut self, _addr: u8, _data: &[u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-        fn read_bytes(&mut self, _addr: u8, _buf: &mut [u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-    }
-
-    struct MockGpio {
-        state: HashMap<u8, bool>,
-    }
-
-    impl MockGpio {
-        fn new() -> Self {
-            Self {
-                state: HashMap::new(),
-            }
-        }
-    }
-
-    impl GpioBus for MockGpio {
-        fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
-            self.state.insert(pin_bcm, high);
-            Ok(())
-        }
-        fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
-            Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
-        }
-    }
+    use crate::hat::gpio::HatGpio;
+    use crate::hat::i2c::HatError;
+    use crate::testing::{MockGpio, MockI2c};
 
     // ------------------------------------------------------------------
     // set_motor_speed
@@ -120,7 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_motor_speed_forward_sets_dir_high() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let gpio = HatGpio::new(MockGpio::new());
 
         set_motor_speed(&hat, &gpio, 12, 24, false, 50.0)
@@ -133,7 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_motor_speed_backward_sets_dir_low() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let gpio = HatGpio::new(MockGpio::new());
 
         set_motor_speed(&hat, &gpio, 12, 24, false, -50.0)
@@ -148,7 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_motor_speed_reversed_inverts_direction() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let gpio = HatGpio::new(MockGpio::new());
 
         // Positive speed + reversed=true → dir should be LOW
@@ -166,7 +128,7 @@ mod tests {
     #[tokio::test]
     async fn set_motor_speed_zero_sets_dir_high_and_zero_duty() {
         // speed=0 → forward XOR false = HIGH; duty = 0.0% (stop)
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let gpio = HatGpio::new(MockGpio::new());
 
         set_motor_speed(&hat, &gpio, 12, 24, false, 0.0)
@@ -182,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_motor_speed_invalid_pwm_channel_returns_error() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let gpio = HatGpio::new(MockGpio::new());
 
         let err = set_motor_speed(&hat, &gpio, 5, 24, false, 50.0)
@@ -197,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn set_motor_speed_clamps_speed_above_100() {
         // Should not return an error even if speed_pct > 100
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let gpio = HatGpio::new(MockGpio::new());
 
         set_motor_speed(&hat, &gpio, 12, 24, false, 150.0)
@@ -211,13 +173,13 @@ mod tests {
 
     #[tokio::test]
     async fn idle_motor_succeeds_for_valid_channel() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         idle_motor(&hat, 12).await.unwrap();
     }
 
     #[tokio::test]
     async fn idle_motor_rejects_servo_channel() {
-        let hat = Hat::new(MockI2c, 0x14);
+        let hat = Hat::new(MockI2c { response: [0, 0] }, 0x14);
         let err = idle_motor(&hat, 0).await.unwrap_err();
         assert!(matches!(err, HatError::InvalidMotorChannel(0)));
     }

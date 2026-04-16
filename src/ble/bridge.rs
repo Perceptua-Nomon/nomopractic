@@ -198,36 +198,13 @@ mod tests {
     use std::sync::Arc;
 
     use crate::config::Config;
-    use crate::hat::gpio::{GpioBus, GpioError, HatGpio};
-    use crate::hat::i2c::{Hat, HatError, I2cBus};
-
-    struct MockI2c;
-    impl I2cBus for MockI2c {
-        fn write_bytes(&mut self, _addr: u8, _data: &[u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-        fn read_bytes(&mut self, _addr: u8, buf: &mut [u8]) -> Result<(), HatError> {
-            // Return zeros.
-            for b in buf.iter_mut() {
-                *b = 0;
-            }
-            Ok(())
-        }
-    }
-
-    struct MockGpio;
-    impl GpioBus for MockGpio {
-        fn write_pin(&mut self, _pin_bcm: u8, _high: bool) -> Result<(), GpioError> {
-            Ok(())
-        }
-        fn read_pin(&mut self, _pin_bcm: u8) -> Result<bool, GpioError> {
-            Ok(false)
-        }
-    }
+    use crate::hat::gpio::HatGpio;
+    use crate::hat::i2c::Hat;
+    use crate::testing::{MockGpio, MockI2c};
 
     fn test_handler() -> Handler {
-        let hat = Arc::new(Hat::new(MockI2c, 0x14));
-        let gpio = Arc::new(HatGpio::new(MockGpio));
+        let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
+        let gpio = Arc::new(HatGpio::new(MockGpio::new()));
         Handler::new(Arc::new(Config::default()), hat, gpio)
     }
 

@@ -5,3 +5,5 @@ pub mod hat;
 pub mod ipc;
 pub mod reset;
 pub mod routine;
+#[doc(hidden)]
+pub mod testing;

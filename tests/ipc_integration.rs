@@ -1,108 +1,25 @@
 // Integration test: start IPC listener, connect, send requests, verify responses.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use nomopractic::config::Config;
-use nomopractic::hat::audio::{AlsaControl, AudioError};
-use nomopractic::hat::gpio::{GpioBus, GpioError, HatGpio};
-use nomopractic::hat::i2c::{Hat, HatError, I2cBus};
+use nomopractic::hat::audio::AlsaControl;
+use nomopractic::hat::gpio::HatGpio;
+use nomopractic::hat::i2c::Hat;
 use nomopractic::ipc::handler::Handler;
-
-// ---------------------------------------------------------------------------
-// Mock I2C bus
-// ---------------------------------------------------------------------------
-
-struct MockI2c {
-    /// Fixed 2-byte response returned for every read.
-    adc_response: [u8; 2],
-}
-
-impl MockI2c {
-    fn new(hi: u8, lo: u8) -> Self {
-        Self {
-            adc_response: [hi, lo],
-        }
-    }
-}
-
-impl I2cBus for MockI2c {
-    fn write_bytes(&mut self, _addr: u8, _data: &[u8]) -> Result<(), HatError> {
-        Ok(())
-    }
-
-    fn read_bytes(&mut self, _addr: u8, buf: &mut [u8]) -> Result<(), HatError> {
-        if buf.len() >= 2 {
-            buf[0] = self.adc_response[0];
-            buf[1] = self.adc_response[1];
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Mock GPIO bus
-// ---------------------------------------------------------------------------
-
-struct MockGpio {
-    state: std::collections::HashMap<u8, bool>,
-}
-
-impl MockGpio {
-    fn new() -> Self {
-        Self {
-            state: std::collections::HashMap::new(),
-        }
-    }
-}
-
-impl GpioBus for MockGpio {
-    fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
-        self.state.insert(pin_bcm, high);
-        Ok(())
-    }
-
-    fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
-        Ok(*self.state.get(&pin_bcm).unwrap_or(&false))
-    }
-}
+use nomopractic::testing::{MockAlsaControl, MockGpio, MockI2c};
 
 // ---------------------------------------------------------------------------
 // Mock ALSA control (hermetic — never touches the host mixer)
 // ---------------------------------------------------------------------------
 
-struct MockAlsaControl {
-    volume: AtomicU8,
-    mic_gain: AtomicU8,
-}
-
-impl MockAlsaControl {
-    fn new() -> Self {
-        Self {
-            volume: AtomicU8::new(50),
-            mic_gain: AtomicU8::new(50),
-        }
-    }
-}
-
-impl AlsaControl for MockAlsaControl {
-    fn get_volume_pct(&self) -> Result<u8, AudioError> {
-        Ok(self.volume.load(AtomicOrdering::SeqCst))
-    }
-    fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
-        self.volume.store(pct, AtomicOrdering::SeqCst);
-        Ok(())
-    }
-    fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
-        Ok(self.mic_gain.load(AtomicOrdering::SeqCst))
-    }
-    fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
-        self.mic_gain.store(pct, AtomicOrdering::SeqCst);
-        Ok(())
-    }
+// We reuse MockAlsaControl from nomopractic::testing, but the integration
+// test needs a simpler constructor that defaults both values to 50.
+fn integration_mock_alsa() -> MockAlsaControl {
+    MockAlsaControl::new(50, 50)
 }
 
 // ---------------------------------------------------------------------------
@@ -138,9 +55,9 @@ async fn start_test_server_with_adc(
         ..Default::default()
     });
 
-    let hat = Arc::new(Hat::new(MockI2c::new(hi, lo), config.hat_address));
+    let hat = Arc::new(Hat::new(MockI2c { response: [hi, lo] }, config.hat_address));
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
-    let alsa: Arc<dyn AlsaControl> = Arc::new(MockAlsaControl::new());
+    let alsa: Arc<dyn AlsaControl> = Arc::new(integration_mock_alsa());
 
     let handler = Arc::new(Handler::with_alsa(Arc::clone(&config), hat, gpio, alsa));
 
@@ -296,7 +213,7 @@ async fn serve_rejects_regular_file_at_socket_path() {
     });
 
     let hat = Arc::new(nomopractic::hat::i2c::Hat::new(
-        MockI2c::new(0, 0),
+        MockI2c { response: [0, 0] },
         config.hat_address,
     ));
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
@@ -327,7 +244,7 @@ async fn serve_rejects_symlink_at_socket_path() {
     });
 
     let hat = Arc::new(nomopractic::hat::i2c::Hat::new(
-        MockI2c::new(0, 0),
+        MockI2c { response: [0, 0] },
         config.hat_address,
     ));
     let gpio = Arc::new(HatGpio::new(MockGpio::new()));
@@ -1038,7 +955,7 @@ async fn save_calibration_over_socket() {
     });
 
     let hat = std::sync::Arc::new(nomopractic::hat::i2c::Hat::new(
-        MockI2c::new(0, 0),
+        MockI2c { response: [0, 0] },
         config.hat_address,
     ));
     let gpio = std::sync::Arc::new(nomopractic::hat::gpio::HatGpio::new(MockGpio::new()));

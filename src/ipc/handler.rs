@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tracing::{debug, error, warn};
 
+use super::params::ParamExtractor;
 use super::schema::{Request, Response};
 use crate::calibration::CalibrationStore;
 use crate::config::Config;
@@ -30,32 +31,49 @@ struct McuState {
     last_reset_at: Option<Instant>,
 }
 
-/// Classify a `HatError` into an IPC error code string.
-fn hat_error_code(e: &HatError) -> &'static str {
-    match e {
-        HatError::I2c(_) => "HARDWARE_ERROR",
-        HatError::InvalidChannel(_)
-        | HatError::InvalidServoChannel(_)
-        | HatError::InvalidMotorChannel(_)
-        | HatError::InvalidPulse(_)
-        | HatError::InvalidAngle(_)
-        | HatError::InvalidParam(_) => "INVALID_PARAMS",
+/// Maps a domain error to an IPC error code string.
+trait ErrorCode {
+    fn error_code(&self) -> &'static str;
+}
+
+impl ErrorCode for HatError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            HatError::I2c(_) => "HARDWARE_ERROR",
+            HatError::InvalidChannel(_)
+            | HatError::InvalidServoChannel(_)
+            | HatError::InvalidMotorChannel(_)
+            | HatError::InvalidPulse(_)
+            | HatError::InvalidAngle(_)
+            | HatError::InvalidParam(_) => "INVALID_PARAMS",
+        }
     }
 }
 
-/// Classify a `MotorError` into an IPC error code string.
-fn motor_error_code(e: &MotorError) -> &'static str {
-    match e {
-        MotorError::Hat(he) => hat_error_code(he),
-        MotorError::Gpio(ge) => gpio_error_code(ge),
+impl ErrorCode for MotorError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            MotorError::Hat(he) => he.error_code(),
+            MotorError::Gpio(ge) => ge.error_code(),
+        }
     }
 }
 
-/// Classify a `GpioError` into an IPC error code string.
-fn gpio_error_code(e: &GpioError) -> &'static str {
-    match e {
-        GpioError::Gpio(_) => "HARDWARE_ERROR",
-        GpioError::ReadOnly(_) => "INVALID_PARAMS",
+impl ErrorCode for GpioError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            GpioError::Gpio(_) => "HARDWARE_ERROR",
+            GpioError::ReadOnly(_) => "INVALID_PARAMS",
+        }
+    }
+}
+
+impl ErrorCode for AudioError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            AudioError::Command(_) | AudioError::Io(_) => "HARDWARE_ERROR",
+            AudioError::Parse(_) => "INTERNAL_ERROR",
+        }
     }
 }
 
@@ -266,16 +284,12 @@ impl Handler {
     }
 
     async fn handle_read_adc(&self, request: &Request) -> Response {
-        let channel = match request.params.get("channel").and_then(|v| v.as_u64()) {
-            Some(ch) if ch <= 7 => ch as u8,
-            Some(_) | None => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    "channel is required and must be 0–7",
-                );
-            }
-        };
+        let ext = ParamExtractor::new(request);
+        let channel =
+            match ext.required_u64_as_u8("channel", 0, 7, "channel is required and must be 0–7") {
+                Ok(ch) => ch,
+                Err(resp) => return resp,
+            };
         match adc::read_adc(&self.hat, channel).await {
             Ok(raw) => Response::ok(
                 request.id.clone(),
@@ -283,7 +297,7 @@ impl Handler {
             ),
             Err(e) => {
                 warn!(error = %e, "read_adc failed");
-                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
@@ -319,7 +333,7 @@ impl Handler {
             }
             Err(e) => {
                 warn!(error = %e, "set_servo_pulse_us failed");
-                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
@@ -329,15 +343,15 @@ impl Handler {
             Ok(ch) => ch,
             Err(resp) => return resp,
         };
-        let angle_deg = match request.params.get("angle_deg").and_then(|v| v.as_f64()) {
-            Some(a) if (0.0..=180.0).contains(&a) => a,
-            Some(_) | None => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    "angle_deg is required and must be 0.0–180.0",
-                );
-            }
+        let ext = ParamExtractor::new(request);
+        let angle_deg = match ext.required_f64(
+            "angle_deg",
+            0.0,
+            180.0,
+            "angle_deg is required and must be 0.0–180.0",
+        ) {
+            Ok(a) => a,
+            Err(resp) => return resp,
         };
         let ttl_ms = extract_ttl(request, self.config.servo_default_ttl_ms);
         let ttl_ms = match ttl_ms {
@@ -359,15 +373,16 @@ impl Handler {
             }
             Err(e) => {
                 warn!(error = %e, "set_servo_angle failed");
-                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
 
     async fn handle_read_gpio(&self, request: &Request) -> Response {
-        let pin_name = match request.params.get("pin").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => return Response::err(request.id.clone(), "INVALID_PARAMS", "pin is required"),
+        let ext = ParamExtractor::new(request);
+        let pin_name = match ext.required_str("pin", "pin is required") {
+            Ok(s) => s,
+            Err(resp) => return resp,
         };
         let pin = match gpio::GpioPin::from_name(&pin_name) {
             Some(p) => p,
@@ -388,15 +403,16 @@ impl Handler {
             ),
             Err(e) => {
                 warn!(error = %e, "read_gpio failed");
-                Response::err(request.id.clone(), gpio_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
 
     async fn handle_write_gpio(&self, request: &Request) -> Response {
-        let pin_name = match request.params.get("pin").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => return Response::err(request.id.clone(), "INVALID_PARAMS", "pin is required"),
+        let ext = ParamExtractor::new(request);
+        let pin_name = match ext.required_str("pin", "pin is required") {
+            Ok(s) => s,
+            Err(resp) => return resp,
         };
         let pin = match gpio::GpioPin::from_name(&pin_name) {
             Some(p) => p,
@@ -410,15 +426,9 @@ impl Handler {
                 );
             }
         };
-        let high = match request.params.get("high").and_then(|v| v.as_bool()) {
-            Some(h) => h,
-            None => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    "high is required and must be a boolean",
-                );
-            }
+        let high = match ext.required_bool("high", "high is required and must be a boolean") {
+            Ok(h) => h,
+            Err(resp) => return resp,
         };
         match gpio::write_gpio_pin(&self.gpio, pin, high).await {
             Ok(()) => Response::ok(
@@ -427,7 +437,7 @@ impl Handler {
             ),
             Err(e) => {
                 warn!(error = %e, "write_gpio failed");
-                Response::err(request.id.clone(), gpio_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
@@ -497,6 +507,81 @@ impl Handler {
         )
     }
 
+    /// Apply calibration to a speed value for a specific motor channel.
+    ///
+    /// Returns `(effective_speed, reversed)` — the calibration-adjusted speed
+    /// and the final direction-reversal flag.
+    async fn calibrated_speed(&self, ipc_channel: u8, speed_pct: f64) -> (f64, bool) {
+        let cal_guard = self.calibration.lock().await;
+        let cal = &cal_guard.motors[ipc_channel as usize];
+        let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
+        let effective = if scaled.abs() < cal.deadband_pct {
+            0.0
+        } else {
+            scaled
+        };
+        let reversed = cal.reversed ^ self.config.motors[ipc_channel as usize].reversed;
+        (effective, reversed)
+    }
+
+    /// Command one or more motors atomically with rollback on partial failure.
+    ///
+    /// `motor_speeds` maps IPC channel → desired speed percentage.  Calibration
+    /// is applied per-channel.  On success, leases are committed.  On partial
+    /// failure, already-set motors are rolled back (idled) and no leases are
+    /// committed.
+    ///
+    /// Returns `Ok(succeeded_channels)` or `Err(error_messages)`.
+    async fn atomic_motor_operation(
+        &self,
+        motor_speeds: &[(u8, f64)],
+        conn_id: u64,
+        ttl_ms: u64,
+    ) -> Result<Vec<u8>, Vec<String>> {
+        let mut succeeded: Vec<u8> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        for &(ipc_ch, speed_pct) in motor_speeds {
+            let (effective_speed, final_reversed) = self.calibrated_speed(ipc_ch, speed_pct).await;
+            let cfg = &self.config.motors[ipc_ch as usize];
+            match motor::set_motor_speed(
+                &self.hat,
+                &self.gpio,
+                cfg.pwm_channel,
+                cfg.dir_pin_bcm,
+                final_reversed,
+                effective_speed,
+            )
+            .await
+            {
+                Ok(()) => succeeded.push(ipc_ch),
+                Err(e) => {
+                    warn!(error = %e, channel = ipc_ch, "motor command failed");
+                    errors.push(format!("channel {ipc_ch}: {e}"));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            for &ipc_ch in &succeeded {
+                self.motor_lease_manager
+                    .set_lease(ipc_ch, conn_id, ttl_ms)
+                    .await;
+            }
+            Ok(succeeded)
+        } else {
+            // Rollback: idle any motors that did start.
+            for &ipc_ch in &succeeded {
+                let cfg = &self.config.motors[ipc_ch as usize];
+                if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
+                    error!(error = %e, channel = ipc_ch, "rollback idle failed");
+                    errors.push(format!("channel {ipc_ch}: rollback failed: {e}"));
+                }
+            }
+            Err(errors)
+        }
+    }
+
     async fn handle_set_motor_speed(&self, request: &Request, conn_id: u64) -> Response {
         let num_motors = self.config.motors.len();
         let ipc_channel = match request.params.get("channel").and_then(|v| v.as_u64()) {
@@ -534,44 +619,15 @@ impl Handler {
             Err(resp) => return resp,
         };
 
-        // Apply motor calibration — acquire lock, copy values, drop lock before await.
-        let (effective_speed, final_reversed) = {
-            let cal_guard = self.calibration.lock().await;
-            let cal = &cal_guard.motors[ipc_channel as usize];
-            let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
-            let effective = if scaled.abs() < cal.deadband_pct {
-                0.0
-            } else {
-                scaled
-            };
-            let reversed = cal.reversed ^ self.config.motors[ipc_channel as usize].reversed;
-            (effective, reversed)
-        };
-
-        let cfg = &self.config.motors[ipc_channel as usize];
-        match motor::set_motor_speed(
-            &self.hat,
-            &self.gpio,
-            cfg.pwm_channel,
-            cfg.dir_pin_bcm,
-            final_reversed,
-            effective_speed,
-        )
-        .await
+        match self
+            .atomic_motor_operation(&[(ipc_channel, speed_pct)], conn_id, ttl_ms)
+            .await
         {
-            Ok(()) => {
-                self.motor_lease_manager
-                    .set_lease(ipc_channel, conn_id, ttl_ms)
-                    .await;
-                Response::ok(
-                    request.id.clone(),
-                    json!({ "channel": ipc_channel, "speed_pct": speed_pct }),
-                )
-            }
-            Err(e) => {
-                warn!(error = %e, "set_motor_speed failed");
-                Response::err(request.id.clone(), motor_error_code(&e), e.to_string())
-            }
+            Ok(_) => Response::ok(
+                request.id.clone(),
+                json!({ "channel": ipc_channel, "speed_pct": speed_pct }),
+            ),
+            Err(errors) => Response::err(request.id.clone(), "HARDWARE_ERROR", errors.join("; ")),
         }
     }
 
@@ -623,22 +679,15 @@ impl Handler {
     /// successfully commanded.  If any motor fails, already-set motors are
     /// rolled back (idled) and no leases are committed.
     async fn handle_drive(&self, request: &Request, conn_id: u64) -> Response {
-        let speed_pct = match request.params.get("speed_pct").and_then(|v| v.as_f64()) {
-            Some(s) if (-100.0..=100.0).contains(&s) => s,
-            Some(s) => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    format!("speed_pct {s} is out of range -100.0..=100.0"),
-                );
-            }
-            None => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    "speed_pct is required",
-                );
-            }
+        let ext = ParamExtractor::new(request);
+        let speed_pct = match ext.required_f64(
+            "speed_pct",
+            -100.0,
+            100.0,
+            "speed_pct is required and must be -100.0–100.0",
+        ) {
+            Ok(s) => s,
+            Err(resp) => return resp,
         };
         let ttl_ms = match extract_ttl(request, self.config.motor_default_ttl_ms) {
             Ok(ms) => ms,
@@ -649,76 +698,22 @@ impl Handler {
             return Response::err(request.id.clone(), "INVALID_PARAMS", "no motors configured");
         }
 
-        // Snapshot calibration for all motor channels before any hardware calls.
-        // Guard is acquired once, all values are copied, then guard is dropped.
-        let cal_entries: Vec<(f64, bool)> = {
-            let cal_guard = self.calibration.lock().await;
-            self.config
-                .motors
-                .iter()
-                .enumerate()
-                .map(|(i, cfg)| {
-                    let cal = &cal_guard.motors[i];
-                    let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
-                    let effective = if scaled.abs() < cal.deadband_pct {
-                        0.0
-                    } else {
-                        scaled
-                    };
-                    let reversed = cal.reversed ^ cfg.reversed;
-                    (effective, reversed)
-                })
-                .collect()
-        };
-        let mut succeeded: Vec<u8> = Vec::new();
-        let mut errors: Vec<String> = Vec::new();
-        for (ipc_ch, cfg) in self.config.motors.iter().enumerate() {
-            let (effective_speed, final_reversed) = cal_entries[ipc_ch];
-            match motor::set_motor_speed(
-                &self.hat,
-                &self.gpio,
-                cfg.pwm_channel,
-                cfg.dir_pin_bcm,
-                final_reversed,
-                effective_speed,
-            )
-            .await
-            {
-                Ok(()) => succeeded.push(ipc_ch as u8),
-                Err(e) => {
-                    warn!(error = %e, channel = ipc_ch, "drive: set_motor_speed failed");
-                    errors.push(format!("channel {ipc_ch}: {e}"));
-                }
-            }
-        }
+        let motor_speeds: Vec<(u8, f64)> = (0..self.config.motors.len())
+            .map(|i| (i as u8, speed_pct))
+            .collect();
 
-        if errors.is_empty() {
-            // Phase 2: all succeeded — commit leases now.
-            for ipc_ch in &succeeded {
-                self.motor_lease_manager
-                    .set_lease(*ipc_ch, conn_id, ttl_ms)
-                    .await;
-            }
-            Response::ok(
+        match self
+            .atomic_motor_operation(&motor_speeds, conn_id, ttl_ms)
+            .await
+        {
+            Ok(_) => Response::ok(
                 request.id.clone(),
                 json!({
                     "speed_pct": speed_pct,
                     "motors": self.config.motors.len(),
                 }),
-            )
-        } else {
-            // Phase 2: partial failure — roll back any motors that did start.
-            let mut rollback_errors: Vec<String> = Vec::new();
-            for ipc_ch in &succeeded {
-                let cfg = &self.config.motors[*ipc_ch as usize];
-                if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
-                    error!(error = %e, channel = ipc_ch, "drive: rollback idle failed");
-                    rollback_errors.push(format!("channel {ipc_ch}: rollback failed: {e}"));
-                }
-            }
-            let mut all_errors = errors;
-            all_errors.extend(rollback_errors);
-            Response::err(request.id.clone(), "HARDWARE_ERROR", all_errors.join("; "))
+            ),
+            Err(errors) => Response::err(request.id.clone(), "HARDWARE_ERROR", errors.join("; ")),
         }
     }
 
@@ -821,7 +816,7 @@ impl Handler {
             }
             Err(e) => {
                 warn!(error = %e, servo = servo_name, "set_named_servo failed");
-                Response::err(request.id.clone(), hat_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
@@ -838,7 +833,7 @@ impl Handler {
                     warn!(error = %e, channel = ch, "read_grayscale ADC read failed");
                     return Response::err(
                         request.id.clone(),
-                        hat_error_code(&e),
+                        e.error_code(),
                         format!("grayscale channel {ch}: {e}"),
                     );
                 }
@@ -879,7 +874,7 @@ impl Handler {
                 "no valid echo received (object out of sensor range 2–400 cm)",
             ),
             Err(ultrasonic::UltrasonicError::Gpio(e)) => {
-                Response::err(request.id.clone(), gpio_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
         }
     }
@@ -892,7 +887,7 @@ impl Handler {
                 request.id.clone(),
                 json!({ "enabled": true, "pin_bcm": bcm }),
             ),
-            Err(e) => Response::err(request.id.clone(), gpio_error_code(&e), e.to_string()),
+            Err(e) => Response::err(request.id.clone(), e.error_code(), e.to_string()),
         }
     }
 
@@ -904,21 +899,21 @@ impl Handler {
                 request.id.clone(),
                 json!({ "enabled": false, "pin_bcm": bcm }),
             ),
-            Err(e) => Response::err(request.id.clone(), gpio_error_code(&e), e.to_string()),
+            Err(e) => Response::err(request.id.clone(), e.error_code(), e.to_string()),
         }
     }
 
     /// `set_volume { volume_pct: u8 }` — set output volume via ALSA mixer.
     async fn handle_set_volume(&self, request: &Request) -> Response {
-        let volume_pct = match request.params.get("volume_pct").and_then(|v| v.as_u64()) {
-            Some(p) if p <= 100 => p as u8,
-            Some(_) | None => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    "volume_pct is required and must be 0–100",
-                );
-            }
+        let ext = ParamExtractor::new(request);
+        let volume_pct = match ext.required_u64_as_u8(
+            "volume_pct",
+            0,
+            100,
+            "volume_pct is required and must be 0–100",
+        ) {
+            Ok(v) => v,
+            Err(resp) => return resp,
         };
         let alsa = Arc::clone(&self.alsa);
         match tokio::task::spawn_blocking(move || alsa.set_volume_pct(volume_pct)).await {
@@ -928,7 +923,7 @@ impl Handler {
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "set_volume failed");
-                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
             Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
         }
@@ -941,7 +936,7 @@ impl Handler {
             Ok(Ok(pct)) => Response::ok(request.id.clone(), json!({ "volume_pct": pct })),
             Ok(Err(e)) => {
                 warn!(error = %e, "get_volume failed");
-                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
             Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
         }
@@ -949,15 +944,15 @@ impl Handler {
 
     /// `set_mic_gain { gain_pct: u8 }` — set microphone capture gain via ALSA.
     async fn handle_set_mic_gain(&self, request: &Request) -> Response {
-        let gain_pct = match request.params.get("gain_pct").and_then(|v| v.as_u64()) {
-            Some(p) if p <= 100 => p as u8,
-            Some(_) | None => {
-                return Response::err(
-                    request.id.clone(),
-                    "INVALID_PARAMS",
-                    "gain_pct is required and must be 0–100",
-                );
-            }
+        let ext = ParamExtractor::new(request);
+        let gain_pct = match ext.required_u64_as_u8(
+            "gain_pct",
+            0,
+            100,
+            "gain_pct is required and must be 0–100",
+        ) {
+            Ok(v) => v,
+            Err(resp) => return resp,
         };
         let alsa = Arc::clone(&self.alsa);
         match tokio::task::spawn_blocking(move || alsa.set_mic_gain_pct(gain_pct)).await {
@@ -967,7 +962,7 @@ impl Handler {
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "set_mic_gain failed");
-                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
             Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
         }
@@ -980,7 +975,7 @@ impl Handler {
             Ok(Ok(pct)) => Response::ok(request.id.clone(), json!({ "gain_pct": pct })),
             Ok(Err(e)) => {
                 warn!(error = %e, "get_mic_gain failed");
-                Response::err(request.id.clone(), alsa_error_code(&e), e.to_string())
+                Response::err(request.id.clone(), e.error_code(), e.to_string())
             }
             Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
         }
@@ -1186,7 +1181,7 @@ impl Handler {
             Ok(v) => v,
             Err(e) => {
                 warn!(error = %e, adc_channel, "calibrate_grayscale ADC read failed");
-                return Response::err(request.id.clone(), hat_error_code(&e), e.to_string());
+                return Response::err(request.id.clone(), e.error_code(), e.to_string());
             }
         };
 
@@ -1252,7 +1247,7 @@ impl Handler {
                     warn!(error = %e, channel = ch, "read_grayscale_normalized ADC read failed");
                     return Response::err(
                         request.id.clone(),
-                        hat_error_code(&e),
+                        e.error_code(),
                         format!("grayscale channel {ch}: {e}"),
                     );
                 }
@@ -1487,14 +1482,6 @@ impl Handler {
     }
 }
 
-/// Classify an `AudioError` into an IPC error code string.
-fn alsa_error_code(e: &AudioError) -> &'static str {
-    match e {
-        AudioError::Command(_) | AudioError::Io(_) => "HARDWARE_ERROR",
-        AudioError::Parse(_) => "INTERNAL_ERROR",
-    }
-}
-
 /// Extract and validate `channel` (0–11) from request params.
 fn extract_channel(request: &Request) -> Result<u8, Response> {
     match request.params.get("channel").and_then(|v| v.as_u64()) {
@@ -1530,48 +1517,8 @@ fn extract_ttl(request: &Request, default_ttl_ms: u64) -> Result<u64, Response> 
 mod tests {
     use super::*;
     use crate::hat::gpio::{GpioBus, GpioError, HatGpio};
-    use crate::hat::i2c::{HatError, I2cBus};
-
-    struct MockI2c {
-        response: [u8; 2],
-    }
-
-    impl I2cBus for MockI2c {
-        fn write_bytes(&mut self, _addr: u8, _data: &[u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-
-        fn read_bytes(&mut self, _addr: u8, buf: &mut [u8]) -> Result<(), HatError> {
-            if buf.len() >= 2 {
-                buf[0] = self.response[0];
-                buf[1] = self.response[1];
-            }
-            Ok(())
-        }
-    }
-
-    struct MockGpio {
-        state: std::collections::HashMap<u8, bool>,
-    }
-
-    impl MockGpio {
-        fn new() -> Self {
-            Self {
-                state: std::collections::HashMap::new(),
-            }
-        }
-    }
-
-    impl GpioBus for MockGpio {
-        fn write_pin(&mut self, pin_bcm: u8, high: bool) -> Result<(), GpioError> {
-            self.state.insert(pin_bcm, high);
-            Ok(())
-        }
-
-        fn read_pin(&mut self, pin_bcm: u8) -> Result<bool, GpioError> {
-            Ok(self.state.get(&pin_bcm).copied().unwrap_or(false))
-        }
-    }
+    use crate::hat::i2c::Hat;
+    use crate::testing::{MockAlsaControl, MockGpio, MockI2c};
 
     fn test_handler() -> Handler {
         let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
@@ -2298,66 +2245,6 @@ mod tests {
     // ------------------------------------------------------------------
     // Mock AlsaControl for audio level tests
     // ------------------------------------------------------------------
-
-    use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
-
-    use crate::hat::audio::{AlsaControl, AudioError};
-
-    struct MockAlsaControl {
-        volume: AtomicU8,
-        mic_gain: AtomicU8,
-        fail: bool,
-    }
-
-    impl MockAlsaControl {
-        fn new(volume: u8, mic_gain: u8) -> Self {
-            Self {
-                volume: AtomicU8::new(volume),
-                mic_gain: AtomicU8::new(mic_gain),
-                fail: false,
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                volume: AtomicU8::new(0),
-                mic_gain: AtomicU8::new(0),
-                fail: true,
-            }
-        }
-    }
-
-    impl AlsaControl for MockAlsaControl {
-        fn get_volume_pct(&self) -> Result<u8, AudioError> {
-            if self.fail {
-                return Err(AudioError::Command("mock amixer error".into()));
-            }
-            Ok(self.volume.load(AtomicOrdering::SeqCst))
-        }
-
-        fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
-            if self.fail {
-                return Err(AudioError::Command("mock amixer error".into()));
-            }
-            self.volume.store(pct, AtomicOrdering::SeqCst);
-            Ok(())
-        }
-
-        fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
-            if self.fail {
-                return Err(AudioError::Command("mock amixer error".into()));
-            }
-            Ok(self.mic_gain.load(AtomicOrdering::SeqCst))
-        }
-
-        fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
-            if self.fail {
-                return Err(AudioError::Command("mock amixer error".into()));
-            }
-            self.mic_gain.store(pct, AtomicOrdering::SeqCst);
-            Ok(())
-        }
-    }
 
     fn test_handler_with_mock_alsa(mock: MockAlsaControl) -> Handler {
         let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));

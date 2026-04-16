@@ -360,7 +360,7 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 10 | Calibration & Configuration | ✅ Complete | 206 |
 | 11 | Routine Engine | ✅ Complete | 222 |
 | 12 | Line-Following Routine | 🔲 Planned | — |
-| 13 | BLE GATT Server | ✅ Complete | 258 |
+| 13 | BLE GATT Server | ✅ Complete | 278 |
 
 ---
 

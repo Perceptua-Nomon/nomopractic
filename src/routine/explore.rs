@@ -43,6 +43,16 @@ pub struct ExploreParams {
     pub avoidance_turn_angle_deg: f64,
 }
 
+/// Motor-subsystem references shared across explore helpers.
+struct MotorContext<'a> {
+    hat: &'a Hat,
+    gpio: &'a HatGpio,
+    config: &'a Config,
+    calibration: &'a Mutex<CalibrationStore>,
+    motor_lease_manager: &'a LeaseManager,
+    lease_ttl_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -70,18 +80,27 @@ pub async fn explore_task(
     // TTL for motor leases: refresh every loop_interval; give 3× margin.
     let motor_lease_ttl_ms = params.loop_interval.as_millis() as u64 * 3;
 
+    let mctx = MotorContext {
+        hat: &hat,
+        gpio: &gpio,
+        config: &config,
+        calibration: &calibration,
+        motor_lease_manager: &motor_lease_manager,
+        lease_ttl_ms: motor_lease_ttl_ms,
+    };
+
     loop {
         // 1. Check stop flag.
         if stop_flag.load(Ordering::Relaxed) {
             info!("explore_task: stop commanded");
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
+            stop_motors_and_revoke(&mctx).await;
             return (stats, "commanded".to_string());
         }
 
         // 2. Check max duration.
         if started.elapsed() >= params.max_duration {
             info!("explore_task: max_duration reached");
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
+            stop_motors_and_revoke(&mctx).await;
             return (stats, "timeout".to_string());
         }
 
@@ -95,17 +114,8 @@ pub async fn explore_task(
         if cliff_detected {
             stats.cliffs_avoided += 1;
             warn!("explore_task: cliff detected — avoiding");
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            avoidance_manoeuvre(
-                &hat,
-                &gpio,
-                &config,
-                &calibration,
-                &motor_lease_manager,
-                &params,
-                motor_lease_ttl_ms,
-            )
-            .await;
+            stop_motors_and_revoke(&mctx).await;
+            avoidance_manoeuvre(&mctx, &params).await;
             continue;
         }
 
@@ -113,31 +123,13 @@ pub async fn explore_task(
         if !distance_ok {
             stats.obstacles_avoided += 1;
             warn!("explore_task: obstacle detected — avoiding");
-            stop_motors_and_revoke(&hat, &config, &motor_lease_manager).await;
-            avoidance_manoeuvre(
-                &hat,
-                &gpio,
-                &config,
-                &calibration,
-                &motor_lease_manager,
-                &params,
-                motor_lease_ttl_ms,
-            )
-            .await;
+            stop_motors_and_revoke(&mctx).await;
+            avoidance_manoeuvre(&mctx, &params).await;
             continue;
         }
 
         // 7. Clear — drive forward.
-        drive_all(
-            &hat,
-            &gpio,
-            &config,
-            &calibration,
-            &motor_lease_manager,
-            motor_lease_ttl_ms,
-            params.speed_pct,
-        )
-        .await;
+        drive_all(&mctx, params.speed_pct).await;
         steer_channel(&hat, &config, &calibration, 90.0).await;
 
         tokio::time::sleep(params.loop_interval).await;
@@ -151,34 +143,17 @@ pub async fn explore_task(
 /// Reverse, steer away, then drive forward in an arc until the path is clear
 /// or `avoidance_backup` elapses.  Steering is reset to 90° (straight) before
 /// returning.  The caller must stop the motors before calling this function.
-async fn avoidance_manoeuvre(
-    hat: &Hat,
-    gpio: &HatGpio,
-    config: &Config,
-    calibration: &Mutex<CalibrationStore>,
-    motor_lease_manager: &LeaseManager,
-    params: &ExploreParams,
-    motor_lease_ttl_ms: u64,
-) {
+async fn avoidance_manoeuvre(mctx: &MotorContext<'_>, params: &ExploreParams) {
     // 1. Reverse for avoidance_backup duration.
-    drive_all(
-        hat,
-        gpio,
-        config,
-        calibration,
-        motor_lease_manager,
-        motor_lease_ttl_ms,
-        -params.speed_pct,
-    )
-    .await;
+    drive_all(mctx, -params.speed_pct).await;
     tokio::time::sleep(params.avoidance_backup).await;
-    stop_motors_and_revoke(hat, config, motor_lease_manager).await;
+    stop_motors_and_revoke(mctx).await;
 
     // 2. Steer away from the obstacle.
     steer_channel(
-        hat,
-        config,
-        calibration,
+        mctx.hat,
+        mctx.config,
+        mctx.calibration,
         90.0 + params.avoidance_turn_angle_deg,
     )
     .await;
@@ -191,56 +166,38 @@ async fn avoidance_manoeuvre(
         if turn_start.elapsed() >= params.avoidance_backup {
             break;
         }
-        drive_all(
-            hat,
-            gpio,
-            config,
-            calibration,
-            motor_lease_manager,
-            motor_lease_ttl_ms,
-            params.speed_pct,
-        )
-        .await;
+        drive_all(mctx, params.speed_pct).await;
         tokio::time::sleep(params.loop_interval).await;
-        let path_clear = read_ultrasonic(gpio, config, params).await;
-        let cliff = read_normalized_cliff(hat, config, calibration, params).await;
+        let path_clear = read_ultrasonic(mctx.gpio, mctx.config, params).await;
+        let cliff = read_normalized_cliff(mctx.hat, mctx.config, mctx.calibration, params).await;
         if path_clear && !cliff {
             break;
         }
     }
-    stop_motors_and_revoke(hat, config, motor_lease_manager).await;
+    stop_motors_and_revoke(mctx).await;
 
     // 4. Return steering to straight.
-    steer_channel(hat, config, calibration, 90.0).await;
+    steer_channel(mctx.hat, mctx.config, mctx.calibration, 90.0).await;
 }
 
 /// Stop all configured motors and revoke their leases (best-effort).
-async fn stop_motors_and_revoke(hat: &Hat, config: &Config, motor_lease_manager: &LeaseManager) {
-    for cfg in &config.motors {
-        if let Err(e) = motor::idle_motor(hat, cfg.pwm_channel).await {
+async fn stop_motors_and_revoke(mctx: &MotorContext<'_>) {
+    for cfg in &mctx.config.motors {
+        if let Err(e) = motor::idle_motor(mctx.hat, cfg.pwm_channel).await {
             warn!(error = %e, pwm_channel = cfg.pwm_channel, "explore: stop_motors failed");
         }
     }
-    motor_lease_manager
+    mctx.motor_lease_manager
         .release_connection(ROUTINE_CONN_ID)
         .await;
 }
 
 /// Command all motors to `speed_pct`, applying motor calibration and refreshing leases.
-#[allow(clippy::too_many_arguments)]
-async fn drive_all(
-    hat: &Hat,
-    gpio: &HatGpio,
-    config: &Config,
-    calibration: &Mutex<CalibrationStore>,
-    motor_lease_manager: &LeaseManager,
-    lease_ttl_ms: u64,
-    speed_pct: f64,
-) {
+async fn drive_all(mctx: &MotorContext<'_>, speed_pct: f64) {
     // Snapshot calibration for all channels; drop lock before hardware calls.
     let cal_entries: Vec<(f64, bool)> = {
-        let guard = calibration.lock().await;
-        config
+        let guard = mctx.calibration.lock().await;
+        mctx.config
             .motors
             .iter()
             .enumerate()
@@ -258,11 +215,11 @@ async fn drive_all(
             .collect()
     };
 
-    for (i, cfg) in config.motors.iter().enumerate() {
+    for (i, cfg) in mctx.config.motors.iter().enumerate() {
         let (effective, reversed) = cal_entries[i];
         match motor::set_motor_speed(
-            hat,
-            gpio,
+            mctx.hat,
+            mctx.gpio,
             cfg.pwm_channel,
             cfg.dir_pin_bcm,
             reversed,
@@ -271,8 +228,8 @@ async fn drive_all(
         .await
         {
             Ok(()) => {
-                motor_lease_manager
-                    .set_lease(i as u8, ROUTINE_CONN_ID, lease_ttl_ms)
+                mctx.motor_lease_manager
+                    .set_lease(i as u8, ROUTINE_CONN_ID, mctx.lease_ttl_ms)
                     .await;
             }
             Err(e) => {

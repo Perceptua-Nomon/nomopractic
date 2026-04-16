@@ -28,25 +28,7 @@ pub async fn get_battery_voltage(hat: &Hat) -> Result<f64, HatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hat::i2c::{HatError, I2cBus};
-
-    struct MockI2c {
-        response: [u8; 2],
-    }
-
-    impl I2cBus for MockI2c {
-        fn write_bytes(&mut self, _addr: u8, _data: &[u8]) -> Result<(), HatError> {
-            Ok(())
-        }
-
-        fn read_bytes(&mut self, _addr: u8, buf: &mut [u8]) -> Result<(), HatError> {
-            if buf.len() >= 2 {
-                buf[0] = self.response[0];
-                buf[1] = self.response[1];
-            }
-            Ok(())
-        }
-    }
+    use crate::testing::MockI2c;
 
     #[tokio::test]
     async fn voltage_calculation_matches_spec() {
