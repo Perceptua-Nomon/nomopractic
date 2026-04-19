@@ -1,22 +1,17 @@
-//! BLE GATT server module.
+//! BLE GATT server module — JSON relay over a single GATT service.
 //!
-//! The binary protocol codec ([`protocol`]) is always compiled — it is pure
-//! data encoding/decoding with no BlueZ dependencies, enabling CI testing on
-//! any platform.
+//! Implements the simplified BLE architecture from ADR-004:
+//! - OS-level Bluetooth passkey pairing (BlueZ agent)
+//! - Single GATT service with Command Write and Response Notify characteristics
+//! - NDJSON relay — same format as Unix socket IPC
 //!
-//! All other sub-modules require the `ble` Cargo feature flag (BlueZ D-Bus
+//! All sub-modules require the `ble` Cargo feature flag (BlueZ D-Bus
 //! bindings via `bluer`).
-
-pub mod protocol;
 
 #[cfg(feature = "ble")]
 pub mod bridge;
 #[cfg(feature = "ble")]
 pub mod services;
-#[cfg(feature = "ble")]
-pub mod session;
-#[cfg(feature = "ble")]
-pub mod wifi;
 
 #[cfg(feature = "ble")]
 use std::sync::Arc;
@@ -24,7 +19,7 @@ use std::sync::Arc;
 #[cfg(feature = "ble")]
 use thiserror::Error;
 #[cfg(feature = "ble")]
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(feature = "ble")]
 use crate::config::BleConfig;
@@ -39,16 +34,23 @@ pub enum BleError {
     Dbus(#[from] bluer::Error),
     #[error("BLE not available: {0}")]
     NotAvailable(String),
+    #[error("invalid passkey: {0}")]
+    InvalidPasskey(String),
 }
 
-/// Start the BLE GATT server.
+/// Start the BLE GATT server with OS-level passkey pairing.
 ///
-/// Connects to BlueZ via D-Bus, registers all 4 GATT services (pairing,
-/// command, WiFi, status), starts LE advertising, and spawns tokio tasks
-/// for characteristic I/O.  Runs until the shutdown signal is received.
+/// Registers a BlueZ passkey agent that reads the numeric passkey from
+/// `config.pairing_secret_path`, starts LE advertising with the device name
+/// and service UUID, and registers a single GATT service with Command Write
+/// and Response Notify characteristics.
 ///
-/// On shutdown or client disconnect, clears the BLE session and releases
-/// all motor/servo leases held by the BLE connection.
+/// Incoming BLE writes are accumulated into complete NDJSON lines and
+/// dispatched through the shared [`Handler`].  Responses are chunked at
+/// the MTU boundary and sent as notifications.
+///
+/// On shutdown or client disconnect, clears all motor/servo leases held
+/// by the BLE connection.
 #[cfg(feature = "ble")]
 pub async fn start_ble_server(
     config: &BleConfig,
@@ -56,9 +58,10 @@ pub async fn start_ble_server(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), BleError> {
     use bluer::adv::Advertisement;
+    use bluer::agent::{Agent, AgentHandle, ReqError as AgentReqError};
 
-    let bt_session: bluer::Session = bluer::Session::new().await?;
-    let adapter: bluer::Adapter = bt_session.default_adapter().await?;
+    let bt_session = bluer::Session::new().await?;
+    let adapter = bt_session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
     info!(
@@ -67,10 +70,28 @@ pub async fn start_ble_server(
         "BLE adapter initialised"
     );
 
-    // Build GATT application with all 4 services.
+    // Read the numeric passkey from the pairing secret file.
+    let passkey = read_passkey(&config.pairing_secret_path)?;
+    info!(
+        "BLE passkey loaded from {}",
+        config.pairing_secret_path.display()
+    );
+
+    // Register BlueZ passkey agent.
+    let agent = Agent {
+        request_passkey: Some(Box::new(move |_req| {
+            let pk = passkey;
+            Box::pin(async move { Ok(pk) })
+        })),
+        ..Default::default()
+    };
+    let _agent_handle: AgentHandle = bt_session.register_agent(agent).await?;
+    info!("BlueZ passkey agent registered (KeyboardDisplay)");
+
+    // Build GATT application with single service.
     let (app, char_handles) = services::build_gatt_application();
 
-    let app_handle = adapter.serve_gatt_application(app).await?;
+    let _app_handle = adapter.serve_gatt_application(app).await?;
 
     // Start LE advertising.
     let le_adv = Advertisement {
@@ -79,50 +100,47 @@ pub async fn start_ble_server(
         service_uuids: services::advertised_service_uuids().into_iter().collect(),
         ..Default::default()
     };
-    let adv_handle = adapter.advertise(le_adv).await?;
+    let _adv_handle = adapter.advertise(le_adv).await?;
 
     info!(device_name = %config.device_name, "BLE GATT server advertising");
 
-    // Shared BLE session state.
-    let ble_session = Arc::new(tokio::sync::Mutex::new(session::SessionState::new()));
-
-    // Spawn characteristic I/O handler task.
+    // Spawn the NDJSON bridge I/O task.
     let handler_clone = handler.clone();
-    let session_clone = ble_session.clone();
-    let pairing_secret_path = config.pairing_secret_path.clone();
-    let jwt_secret_env = config.jwt_secret_env.clone();
-
     let io_task = tokio::spawn(async move {
-        if let Err(e) = services::run_characteristic_io(
-            char_handles,
-            handler_clone,
-            session_clone,
-            &pairing_secret_path,
-            &jwt_secret_env,
-        )
-        .await
-        {
-            error!(error = %e, "BLE characteristic I/O error");
+        if let Err(e) = bridge::run_json_relay(char_handles, handler_clone).await {
+            error!(error = %e, "BLE JSON relay error");
         }
     });
 
     // Wait for shutdown signal.
     let _ = shutdown.changed().await;
 
-    // Cleanup: clear session and release all BLE leases.
-    {
-        let mut sess = ble_session.lock().await;
-        sess.clear();
-    }
+    // Cleanup: release all BLE leases.
     handler.on_client_disconnect(bridge::BLE_CONN_ID).await;
 
-    // Abort the I/O task (it may be blocked on characteristic events).
+    // Abort the I/O task.
     io_task.abort();
 
     info!("BLE GATT server stopped");
 
-    drop(adv_handle);
-    drop(app_handle);
-
     Ok(())
+}
+
+/// Read the numeric passkey (000000–999999) from the pairing secret file.
+#[cfg(feature = "ble")]
+fn read_passkey(path: &std::path::Path) -> Result<u32, BleError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| BleError::InvalidPasskey(format!("cannot read {}: {e}", path.display())))?;
+    let trimmed = content.trim();
+    let passkey: u32 = trimmed.parse().map_err(|_| {
+        BleError::InvalidPasskey(format!(
+            "passkey must be a numeric value 000000–999999, got '{trimmed}'"
+        ))
+    })?;
+    if passkey > 999_999 {
+        return Err(BleError::InvalidPasskey(format!(
+            "passkey {passkey} exceeds maximum 999999"
+        )));
+    }
+    Ok(passkey)
 }

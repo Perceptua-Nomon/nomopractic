@@ -56,6 +56,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 REPO="${NOMON_GITHUB_REPO:-Perceptua-Nomon/nomopractic}"
@@ -67,6 +70,30 @@ cleanup() {
     rm -rf "$DOWNLOAD_DIR"
 }
 trap cleanup EXIT
+
+# Deploy-only variables that must NOT be written to the on-device env file.
+_DEPLOY_EXCLUDE='^\s*(NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO)\s*='
+
+# ── Load .env ──────────────────────────────────────────────────────────────────
+
+ENV_FILE="${REPO_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ "${line}" =~ ^# || -z "${line}" ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val%%#*}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        val="${val#\"}" ; val="${val%\"}"
+        val="${val#\'}"; val="${val%\'}"
+        case "${key}" in
+            NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO|NOMON_SERVICE_USER|NOMON_SERVICE_GROUP)
+                export "${key}=${val}" ;;
+        esac
+    done < "${ENV_FILE}"
+fi
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -177,7 +204,33 @@ else
     _rscp() { cp "$1" "$2"; }  # local "scp" = cp
     ON_REMOTE=false
 fi
+copy_nomopractic_env() {
+    if [[ ! -f "${ENV_FILE}" ]]; then
+        echo "==> Warning: .env not found; skipping /etc/nomopractic/nomopractic.env creation." >&2
+        return
+    fi
 
+    local filtered
+    filtered="$(grep -vE "${_DEPLOY_EXCLUDE}" "${ENV_FILE}" \
+        | grep -vE '^\s*#' \
+        | grep -vE '^\s*$' || true)"
+
+    if [[ -z "${filtered}" ]]; then
+        echo "==> No deploy-safe env vars found; skipping /etc/nomopractic/nomopractic.env creation." >&2
+        return
+    fi
+
+    if [[ -n "${PI_HOST}" ]]; then
+        echo "==> Writing /etc/nomopractic/nomopractic.env on remote host..."
+        printf '%s\n' "${filtered}" \
+            | ssh "${SSH_OPTS[@]}" "${PI_HOST}" \
+                'sudo mkdir -p /etc/nomopractic && sudo tee /etc/nomopractic/nomopractic.env >/dev/null'
+    else
+        echo "==> Writing /etc/nomopractic/nomopractic.env locally..."
+        sudo mkdir -p /etc/nomopractic
+        printf '%s\n' "${filtered}" | sudo tee /etc/nomopractic/nomopractic.env > /dev/null
+    fi
+}
 # ── Remote or local installation ─────────────────────────────────────────────
 
 install_binary() {
@@ -198,6 +251,13 @@ install_binary() {
     echo "==> Installed to ${INSTALL_PATH}"
 }
 
+copy_nomopractic_env
+
+REMOTE_SVC_TMP="/tmp/nomopractic_service.$$"
+if [[ "$ON_REMOTE" == true ]]; then
+    _rscp "${REPO_DIR}/systemd/nomopractic.service" "${PI_HOST}:${REMOTE_SVC_TMP}"
+fi
+
 echo "==> Installing binary..."
 
 if [[ "$ON_REMOTE" == true ]]; then
@@ -216,6 +276,9 @@ INSTALL_PATH="${INSTALL_PATH}"
 SERVICE="${SERVICE}"
 REMOTE_TMP="${REMOTE_TMP}"
 REMOTE_CONFIG_TMP="${REMOTE_CONFIG_TMP}"
+REMOTE_SVC_TMP="${REMOTE_SVC_TMP}"
+_DEF_SVC_USER="${NOMON_SERVICE_USER:-root}"
+_DEF_SVC_GROUP="${NOMON_SERVICE_GROUP:-nomon}"
 
 if [[ -f "\${INSTALL_PATH}" ]]; then
     sudo cp "\${INSTALL_PATH}" "\${INSTALL_PATH}.bak"
@@ -228,6 +291,29 @@ sudo chmod 755 "\${tmp}"
 sudo mv -f "\${tmp}" "\${INSTALL_PATH}"
 rm -f "\${REMOTE_TMP}"
 echo "==> Installed to \${INSTALL_PATH}"
+
+# ── Install systemd service file ─────────────────────────────────────────────
+echo "==> Installing nomopractic.service..."
+if ! command -v envsubst >/dev/null 2>&1; then
+    echo "Error: envsubst not found. Install gettext-base: sudo apt-get install -y gettext-base" >&2
+    exit 3
+fi
+
+# Source on-device env for variable substitution; fall back to script defaults.
+if [[ -f /etc/nomopractic/nomopractic.env ]]; then
+    set -o allexport
+    # shellcheck disable=SC1091
+    source /etc/nomopractic/nomopractic.env
+    set +o allexport
+fi
+export NOMON_SERVICE_USER="\${NOMON_SERVICE_USER:-\${_DEF_SVC_USER}}"
+export NOMON_SERVICE_GROUP="\${NOMON_SERVICE_GROUP:-\${_DEF_SVC_GROUP}}"
+
+_expanded="\$(envsubst '\$NOMON_SERVICE_USER \$NOMON_SERVICE_GROUP' < "\${REMOTE_SVC_TMP}")"
+printf '%s\n' "\${_expanded}" | sudo tee /etc/systemd/system/nomopractic.service > /dev/null
+sudo chmod 644 /etc/systemd/system/nomopractic.service
+rm -f "\${REMOTE_SVC_TMP}"
+echo "==> nomopractic.service installed ✓"
 
 # If a config was uploaded, atomically install it to /etc/nomopractic
 if [[ -n "\${REMOTE_CONFIG_TMP}" ]]; then
@@ -248,7 +334,7 @@ sudo systemctl restart "\${SERVICE}"
 sudo systemctl enable  "\${SERVICE}"
 
 echo "==> Waiting for service to become active..."
-for i in \$(seq 1 10); do
+for _ in \$(seq 1 10); do
     if systemctl is-active --quiet "\${SERVICE}"; then
         echo "==> \${SERVICE} is running (version ${DISPLAY_VERSION})"
         exit 0
@@ -278,13 +364,35 @@ else
         echo "==> Installed config to /etc/nomopractic/config.toml"
     fi
 
+    # ── Install systemd service file ─────────────────────────────────────────────
+    echo "==> Installing nomopractic.service..."
+    if ! command -v envsubst >/dev/null 2>&1; then
+        echo "Error: envsubst not found. Install gettext-base: sudo apt-get install -y gettext-base" >&2
+        exit 3
+    fi
+
+    # Source on-device env; fall back to script defaults.
+    if [[ -f /etc/nomopractic/nomopractic.env ]]; then
+        set -o allexport
+        # shellcheck disable=SC1091
+        source /etc/nomopractic/nomopractic.env
+        set +o allexport
+    fi
+    export NOMON_SERVICE_USER="${NOMON_SERVICE_USER:-root}"
+    export NOMON_SERVICE_GROUP="${NOMON_SERVICE_GROUP:-nomon}"
+
+    _expanded="$(envsubst '$NOMON_SERVICE_USER $NOMON_SERVICE_GROUP' < "${REPO_DIR}/systemd/nomopractic.service")"
+    printf '%s\n' "${_expanded}" | sudo tee /etc/systemd/system/nomopractic.service > /dev/null
+    sudo chmod 644 /etc/systemd/system/nomopractic.service
+    echo "==> nomopractic.service installed ✓"
+
     echo "==> Restarting ${SERVICE}.service..."
     sudo systemctl daemon-reload
     sudo systemctl restart "${SERVICE}"
     sudo systemctl enable  "${SERVICE}"
 
     echo "==> Waiting for service to become active..."
-    for i in $(seq 1 10); do
+    for _ in $(seq 1 10); do
         if systemctl is-active --quiet "${SERVICE}"; then
             echo "==> ${SERVICE} is running (version ${DISPLAY_VERSION})"
             exit 0

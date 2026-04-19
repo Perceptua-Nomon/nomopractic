@@ -21,6 +21,7 @@ use crate::hat::ultrasonic;
 use crate::hat::{pwm, servo};
 use crate::reset;
 use crate::routine::RoutineEngine;
+use crate::wifi::{NmcliWifi, WifiControl};
 
 /// Minimum interval between consecutive MCU reset requests (ms).
 const RESET_MIN_INTERVAL_MS: u64 = 1000;
@@ -87,6 +88,7 @@ pub struct Handler {
     gpio: Arc<HatGpio>,
     mcu_state: tokio::sync::Mutex<McuState>,
     alsa: Arc<dyn AlsaControl>,
+    wifi: Arc<dyn WifiControl>,
     calibration: Arc<tokio::sync::Mutex<CalibrationStore>>,
     routine: Arc<tokio::sync::Mutex<RoutineEngine>>,
 }
@@ -99,7 +101,8 @@ impl Handler {
             input_card_index: config.audio.input_card_index,
             input_control: config.audio.input_control.clone(),
         });
-        Self::with_alsa(config, hat, gpio, alsa)
+        let wifi: Arc<dyn WifiControl> = Arc::new(NmcliWifi);
+        Self::with_deps(config, hat, gpio, alsa, wifi)
     }
 
     /// Like `new` but accepts an explicit `AlsaControl` implementation.
@@ -110,6 +113,20 @@ impl Handler {
         hat: Arc<Hat>,
         gpio: Arc<HatGpio>,
         alsa: Arc<dyn AlsaControl>,
+    ) -> Self {
+        let wifi: Arc<dyn WifiControl> = Arc::new(NmcliWifi);
+        Self::with_deps(config, hat, gpio, alsa, wifi)
+    }
+
+    /// Like `new` but accepts explicit trait implementations for all I/O deps.
+    ///
+    /// Used by tests to inject mock implementations.
+    pub fn with_deps(
+        config: Arc<Config>,
+        hat: Arc<Hat>,
+        gpio: Arc<HatGpio>,
+        alsa: Arc<dyn AlsaControl>,
+        wifi: Arc<dyn WifiControl>,
     ) -> Self {
         let n_motors = config.motors.len();
         let calibration_store =
@@ -135,6 +152,7 @@ impl Handler {
                 last_reset_at: None,
             }),
             alsa,
+            wifi,
             calibration,
             routine,
         }
@@ -244,6 +262,12 @@ impl Handler {
             "start_routine" => self.handle_start_routine(&request).await,
             "stop_routine" => self.handle_stop_routine(&request).await,
             "get_routine_status" => self.handle_get_routine_status(&request).await,
+            // WiFi methods.
+            "wifi_scan" => self.handle_wifi_scan(&request).await,
+            "wifi_connect" => self.handle_wifi_connect(&request).await,
+            "wifi_status" => self.handle_wifi_status(&request).await,
+            // Authentication.
+            "authenticate" => self.handle_authenticate(&request).await,
             other => {
                 warn!(method = other, "unknown method");
                 Response::err(
@@ -1480,6 +1504,122 @@ impl Handler {
             }),
         )
     }
+
+    // -----------------------------------------------------------------------
+    // WiFi methods
+    // -----------------------------------------------------------------------
+
+    /// `wifi_scan {}` — scan for visible WiFi networks.
+    async fn handle_wifi_scan(&self, request: &Request) -> Response {
+        let wifi = Arc::clone(&self.wifi);
+        match tokio::task::spawn_blocking(move || wifi.scan()).await {
+            Ok(Ok(networks)) => Response::ok(request.id.clone(), json!({ "networks": networks })),
+            Ok(Err(e)) => {
+                warn!(error = %e, "wifi_scan failed");
+                Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `wifi_connect { ssid, psk }` — connect to a WiFi network.
+    async fn handle_wifi_connect(&self, request: &Request) -> Response {
+        let ssid = match request.params.get("ssid").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
+                    request.id.clone(),
+                    "INVALID_PARAMS",
+                    "ssid is required and must be a non-empty string",
+                );
+            }
+        };
+        let psk = match request.params.get("psk").and_then(|v| v.as_str()) {
+            Some(s) => s.to_owned(),
+            None => {
+                return Response::err(request.id.clone(), "INVALID_PARAMS", "psk is required");
+            }
+        };
+
+        let wifi = Arc::clone(&self.wifi);
+        match tokio::task::spawn_blocking(move || wifi.connect(&ssid, &psk)).await {
+            Ok(Ok(())) => Response::ok(request.id.clone(), json!({ "connected": true })),
+            Ok(Err(e)) => {
+                warn!(error = %e, "wifi_connect failed");
+                Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    /// `wifi_status {}` — return current WiFi connection status.
+    async fn handle_wifi_status(&self, request: &Request) -> Response {
+        let wifi = Arc::clone(&self.wifi);
+        match tokio::task::spawn_blocking(move || wifi.status()).await {
+            Ok(Ok(status)) => {
+                let (state, ssid, signal_pct) = match &status {
+                    crate::wifi::WifiStatus::Connected { ssid, signal_pct } => {
+                        ("connected", Some(ssid.as_str()), Some(*signal_pct))
+                    }
+                    crate::wifi::WifiStatus::Disconnected => ("disconnected", None, None),
+                };
+                Response::ok(
+                    request.id.clone(),
+                    json!({ "state": state, "ssid": ssid, "signal_pct": signal_pct }),
+                )
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "wifi_status failed");
+                Response::err(request.id.clone(), "HARDWARE_ERROR", e.to_string())
+            }
+            Err(e) => Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string()),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Authentication
+    // -----------------------------------------------------------------------
+
+    /// `authenticate {}` — issue a short-lived JWT for the connected client.
+    ///
+    /// Reads the signing secret from the `NOMON_JWT_SECRET` environment variable.
+    /// Returns a JWT with `sub: "device-owner@local"`, 24-hour expiry.
+    async fn handle_authenticate(&self, request: &Request) -> Response {
+        let secret = match std::env::var("NOMON_JWT_SECRET") {
+            Ok(s) if !s.is_empty() => s,
+            _ => {
+                return Response::err(
+                    request.id.clone(),
+                    "INTERNAL_ERROR",
+                    "NOMON_JWT_SECRET environment variable is not set",
+                );
+            }
+        };
+
+        let now = chrono::Utc::now();
+        let exp = now + chrono::Duration::hours(24);
+
+        let claims = json!({
+            "sub": "device-owner@local",
+            "iss": "nomon-device",
+            "iat": now.timestamp(),
+            "exp": exp.timestamp(),
+        });
+
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
+
+        match jsonwebtoken::encode(&header, &claims, &key) {
+            Ok(token) => Response::ok(
+                request.id.clone(),
+                json!({ "token": token, "expires_at": exp.to_rfc3339() }),
+            ),
+            Err(e) => {
+                error!(error = %e, "JWT encoding failed");
+                Response::err(request.id.clone(), "INTERNAL_ERROR", e.to_string())
+            }
+        }
+    }
 }
 
 /// Extract and validate `channel` (0–11) from request params.
@@ -2249,7 +2389,8 @@ mod tests {
     fn test_handler_with_mock_alsa(mock: MockAlsaControl) -> Handler {
         let hat = Arc::new(Hat::new(MockI2c { response: [0, 0] }, 0x14));
         let gpio = Arc::new(HatGpio::new(MockGpio::new()));
-        Handler::with_alsa(Arc::new(Config::default()), hat, gpio, Arc::new(mock))
+        let wifi: Arc<dyn WifiControl> = Arc::new(crate::wifi::MockWifiControl::default());
+        Handler::with_deps(Arc::new(Config::default()), hat, gpio, Arc::new(mock), wifi)
     }
 
     // ------------------------------------------------------------------

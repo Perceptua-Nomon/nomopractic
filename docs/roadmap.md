@@ -361,6 +361,8 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 11 | Routine Engine | ✅ Complete | 222 |
 | 12 | Line-Following Routine | 🔲 Planned | — |
 | 13 | BLE GATT Server | ✅ Complete | 278 |
+| 13.1 | BLE Simplification | ✅ Complete | — |
+| 14 | Service Env-File & Deploy Hardening | ✅ Complete | — |
 
 ---
 
@@ -801,3 +803,400 @@ Practical indoor range: 10–30 m. BLE MTU: 20–244 bytes (negotiated).
 - [x] `cargo test` — all existing + new tests pass
 - [x] `cargo clippy -- -D warnings` clean
 - [x] `cargo fmt --check` clean
+
+---
+
+### Phase 13.1 — BLE Simplification: Native OS Pairing + JSON Relay (P1)
+
+**Goal**: Replace the custom BLE binary protocol, AES-128-CCM encryption, and
+pairing ceremony with OS-level Bluetooth passkey pairing and plain NDJSON relay.
+Reduces ~2,900 lines of BLE code to ~600 lines while making every existing and
+future IPC method automatically available over BLE.
+
+**Architecture decisions:**
+- ADR-004: BLE Simplification — Native OS Pairing + JSON Relay
+- Supersedes: ADR-002 (Binary Protocol), ADR-003 (BLE Security Model)
+- Preserves: ADR-001 (BLE GATT Server in nomopractic)
+
+**Cross-repo dependencies:**
+- nomothetic Phase 18.1: update IPC schema docs, pairing secret format change
+  (numeric passkey instead of arbitrary string)
+- nomotactic Phase 2.1: simplified BLE client
+
+**Scope exclusion:** `reset_pairing` (physical button to clear bonds and
+regenerate passkey) is a future enhancement, not part of this phase.
+
+#### 13.1.0 — Delete Superseded Modules
+- [x] Delete `src/ble/protocol.rs` — binary codec (885 lines, 32 tests)
+- [x] Delete `src/ble/session.rs` — AES-128-CCM + HKDF + JWT issuance (467 lines, 10 tests)
+- [x] Update `src/ble/mod.rs` — remove `pub mod protocol;`, `pub mod session;`
+- [x] Verify: `cargo test` passes (remaining modules may have compile errors;
+      fix in subsequent steps)
+
+#### 13.1.1 — Cargo Dependency Cleanup
+- [x] `Cargo.toml`: move `jsonwebtoken` from optional (`ble` feature) to
+      always-included dependency (needed by `authenticate` IPC method)
+- [x] `Cargo.toml`: remove from optional deps: `hkdf`, `sha2`, `aes`, `ccm`,
+      `subtle`, `rand`
+- [x] `Cargo.toml`: simplify `ble` feature: `ble = ["dep:bluer", "dep:tokio-stream"]`
+- [x] Verify: `cargo build` and `cargo build --features ble` both succeed
+
+#### 13.1.2 — WiFi Module Extraction
+- [x] Create `src/wifi.rs` — move `WifiControl` trait, `NmcliWifi` struct,
+      `WifiNetwork`/`WifiStatus` types, and `parse_scan_output`/`parse_status_output`
+      from `src/ble/wifi.rs` (not behind `ble` feature flag)
+- [x] Remove binary encoding functions from extracted code:
+      `encode_scan_result`, `encode_wifi_status`, `decode_wifi_command`,
+      `WifiCommand` enum (binary variant), `WifiResult` enum
+- [x] Delete `src/ble/wifi.rs`
+- [x] Update `src/lib.rs` — add `pub mod wifi;`
+- [x] Move WiFi tests: keep nmcli parsing/mock tests, remove binary encoding tests
+- [x] Verify: `cargo test` passes
+
+#### 13.1.3 — WiFi IPC Methods
+- [x] `ipc/handler.rs`: add `wifi_scan` method:
+      - Params: `{}` (none)
+      - Instantiate `NmcliWifi` (or use trait-injected `WifiControl`)
+      - Call `wifi_control.scan()`
+      - Result: `{ networks: [{ ssid, signal, security }, ...] }`
+      - Error: `HARDWARE_ERROR` on scan failure
+- [x] `ipc/handler.rs`: add `wifi_connect` method:
+      - Params: `{ ssid: string, password: string }`
+      - Validate: `ssid` and `password` must be non-empty strings
+      - Call `wifi_control.connect(ssid, password)`
+      - Result: `{ success: true }`
+      - Error: `INVALID_PARAMS` on missing fields, `HARDWARE_ERROR` on failure
+- [x] `ipc/handler.rs`: add `wifi_status` method:
+      - Params: `{}` (none)
+      - Call `wifi_control.status()`
+      - Result: `{ state: "disconnected" | "connected", ssid: string | null, signal: integer | null }`
+      - Error: `HARDWARE_ERROR` on query failure
+- [x] `Handler` struct: add `wifi_control: Arc<dyn WifiControl>` field
+      (default: `Arc::new(NmcliWifi)`, test: mock)
+- [x] Unit tests: 6 tests (each method: success + error case)
+
+#### 13.1.4 — Authenticate IPC Method
+- [x] `ipc/handler.rs`: add `authenticate` method (transport-agnostic —
+      available on both BLE and Unix socket; explicit team decision):
+      - Params: `{}` (none)
+      - Read JWT secret from `NOMON_JWT_SECRET` env var; if missing, return
+        `{ code: "INTERNAL_ERROR", message: "JWT secret not configured" }`
+      - Issue JWT (HS256): claims `{ sub: "device-owner@local", iss: "nomon-device",
+        exp: now + 86400, iat: now }`
+      - Result: `{ token: "eyJ...", expires_at: "<RFC3339 timestamp>" }`
+- [x] Define `BLE_CONN_ID: u64 = 1` in `ipc/handler.rs` (not behind feature flag;
+      replaces definition in `ble/bridge.rs`)
+- [x] Unit tests: 3 tests (success via BLE conn_id, success via Unix socket,
+      missing JWT secret)
+
+#### 13.1.5 — Simplified GATT Services (`ble/services.rs`)
+- [x] Rewrite `services.rs` — single GATT service with 2 characteristics:
+  - **nomon Service** (`e3a10001-7b2a-4b9c-8f5a-2b7d6e4f1a3c`)
+  - **Command Write** (`e3a12001-...`): Write property. Client writes NDJSON
+    request chunks. Server accumulates in a per-connection buffer until `\n`,
+    then dispatches via `Handler::dispatch()`.
+  - **Response Notify** (`e3a12002-...`): Notify property. Server sends NDJSON
+    response chunks. If response exceeds (MTU − 3) bytes, split into chunks
+    and send as sequential notifications.
+- [x] Remove all references to pairing, WiFi, and status services
+- [x] Remove all characteristic UUIDs except `COMMAND_WRITE_CHAR` and
+      `COMMAND_RESPONSE_CHAR`; keep `PAIRING_SERVICE_UUID` as the single
+      service UUID (renamed conceptually to "nomon Service")
+- [x] `GattHandles` struct simplified: one write receiver + one notify control
+- [x] `build_gatt_application()` returns simplified application
+- [x] `run_characteristic_io()` rewritten: read NDJSON from write channel,
+      dispatch via handler, send response via notify control; handle chunking
+
+#### 13.1.6 — Simplified Bridge (`ble/bridge.rs`)
+- [x] Rewrite `bridge.rs` — JSON passthrough instead of binary translation:
+  - Receive raw bytes from Command Write characteristic
+  - Accumulate in buffer until `\n` (newline-terminated NDJSON)
+  - Forward complete JSON line to `Handler::dispatch(json_line, BLE_CONN_ID)`
+  - Receive JSON response string from handler
+  - Chunk response at (MTU − 3) boundary, send via Response Notify
+- [x] Keep `BLE_CONN_ID` re-exported from `ipc/handler.rs`
+- [x] Remove all binary codec imports and response mapping logic
+- [x] Unit tests: 4 tests (single-chunk request, multi-chunk request,
+      single-chunk response, multi-chunk response)
+
+#### 13.1.7 — BlueZ Passkey Agent (`ble/mod.rs`)
+- [x] Rewrite `start_ble_server()`:
+  - Read 6-digit numeric passkey from `config.ble.pairing_secret_path`
+  - Parse as `u32` (validate range 0–999999)
+  - Register BlueZ passkey agent via `bluer::agent::Agent`:
+    - `request_passkey` callback returns the stored passkey
+    - Agent capability: `KeyboardDisplay` (supports Passkey Entry)
+  - Build simplified GATT application (1 service, 2 characteristics)
+  - Start LE advertising with device name and service UUID
+  - Spawn characteristic I/O handler task (simplified bridge)
+  - On shutdown: clear session, release BLE leases, stop advertising
+- [x] Remove `SessionState` usage and session imports
+- [x] Simplify `BleError` — remove session-related variants
+- [x] Connection monitoring: detect BLE client disconnect via `bluer` events;
+      idle all `BLE_CONN_ID` leases on disconnect (existing pattern preserved)
+
+#### 13.1.8 — Config Simplification
+- [x] `config.rs`: `BleConfig` struct reduced to:
+      - `enabled: bool` (default `false`)
+      - `device_name: String` (default `"nomon"`)
+      - `pairing_secret_path: PathBuf` (default `/var/lib/nomon/pairing_secret`)
+      - Remove `jwt_secret_env` field (JWT secret now read directly from
+        `NOMON_JWT_SECRET` env var in the `authenticate` handler)
+- [x] `config.toml`: update `[ble]` section to match (remove `jwt_secret_env`)
+- [x] Config validation: `device_name` ≤ 29 bytes (unchanged)
+- [x] Unit tests: update config validation tests
+
+#### 13.1.9 — Test Cleanup & New Tests
+- [x] Remove binary protocol tests (~32 tests in `protocol.rs` — file deleted)
+- [x] Remove crypto/session tests (~10 tests in `session.rs` — file deleted)
+- [x] Remove binary WiFi encoding tests (~10 of ~23 tests in old `wifi.rs`)
+- [x] Keep WiFi nmcli parsing/mock tests (moved to `wifi.rs` at crate root)
+- [x] Add JSON relay integration tests (5 tests):
+      - Valid NDJSON request → correct NDJSON response
+      - Malformed JSON → error response
+      - Multi-chunk request assembly
+      - Multi-chunk response splitting
+      - `authenticate` method from both BLE and Unix socket conn_ids
+- [x] Add WiFi IPC method tests (6 tests, step 13.1.3)
+- [x] Add `authenticate` tests (3 tests, step 13.1.4)
+
+#### 13.1.10 — Documentation
+- [x] Update `docs/architecture.md`:
+      - BLE section: replace binary protocol description with NDJSON relay
+      - Methods Summary: add `wifi_scan`, `wifi_connect`, `wifi_status`, `authenticate`
+      - Module Dependency Graph: update `ble/` tree (remove `protocol.rs`, `session.rs`)
+      - Security section: replace AES-128-CCM description with OS-level passkey pairing
+- [x] Update `docs/adr/002-ble-binary-protocol.md`: add "Superseded by ADR-004" status
+- [x] Update `docs/adr/003-ble-security-model.md`: add "Superseded by ADR-004" status
+- [x] Verify: `docs/roadmap.md` Phase 13.1 entry is complete and consistent
+
+#### Phase 13.1 Exit Criteria
+- [x] BLE GATT server advertises single service with 2 characteristics
+- [x] OS-level passkey pairing works (BlueZ agent returns numeric passkey)
+- [x] NDJSON commands dispatched identically to Unix socket IPC
+- [x] `authenticate` method returns valid JWT over BLE
+- [x] `wifi_scan`, `wifi_connect`, `wifi_status` work from both BLE and Unix socket
+- [x] NDJSON chunking handles responses exceeding BLE MTU
+- [x] BLE disconnect idles all `BLE_CONN_ID` motor/servo leases
+- [x] No crypto crates in `ble` feature (`aes`, `ccm`, `hkdf`, `sha2`, `subtle`, `rand` removed)
+- [x] All tests pass without BlueZ (`ble` feature flag disabled in CI)
+- [x] Net test change: ~56 tests removed, ~19 tests added
+- [x] `cargo test` — all tests pass
+- [x] `cargo clippy -- -D warnings` clean
+- [x] `cargo fmt --check` clean
+
+---
+
+## Phase 14 — Service Env-File & Deploy Hardening ✅
+
+**Goal:** Fix the hardcoded `User=root` / `Group=nomon` in the service file by
+converting it to an `envsubst` template, and extend `scripts/deploy.sh` to
+write a filtered runtime env file and install the expanded service file on the Pi.
+
+**Dependency:** None. No Rust code changes. No IPC changes.
+**Cross-repo:** Paired with nomothetic Phase 19 (same pattern, independent fix).
+
+---
+
+### 14.1 — Service File Template
+
+**File:** `nomopractic/systemd/nomopractic.service`
+
+Add `EnvironmentFile=` and replace hardcoded `User=` / `Group=` with template
+vars. The `${NOMON_SERVICE_USER}` / `${NOMON_SERVICE_GROUP}` placeholders are
+**not** systemd env-var syntax — they are `envsubst` placeholders expanded by
+`scripts/deploy.sh` at install time, before systemd reads the file.
+
+Replace the current `[Service]` section with:
+
+```ini
+[Service]
+Type=simple
+EnvironmentFile=-/etc/nomopractic/nomopractic.env
+User=${NOMON_SERVICE_USER}
+Group=${NOMON_SERVICE_GROUP}
+ExecStartPre=/bin/mkdir -p /run/nomopractic
+ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
+Restart=on-failure
+RestartSec=2s
+Environment=RUST_LOG=info
+```
+
+**Verify:** `grep -E '^User=|^Group=' nomopractic/systemd/nomopractic.service`
+returns `User=${NOMON_SERVICE_USER}` and `Group=${NOMON_SERVICE_GROUP}`.
+
+---
+
+### 14.2 — Document Service Variables in `.env.example`
+
+**File:** `nomopractic/.env.example`
+
+Add after the existing `# Deployment` block (after `NOMON_GITHUB_REPO` comment):
+
+```ini
+# =============================================================================
+# Runtime service identity (systemd)
+# =============================================================================
+# User and group the nomopractic daemon runs as.
+# Substituted into the systemd unit by scripts/deploy.sh at install time via envsubst.
+# Default: User=root (required for rppal I2C/GPIO), Group=nomon.
+# NOMON_SERVICE_USER=root
+# NOMON_SERVICE_GROUP=nomon
+```
+
+**Verify:** `grep NOMON_SERVICE nomopractic/.env.example` shows two commented lines.
+
+---
+
+### 14.3 — Deploy Script Changes
+
+**File:** `nomopractic/scripts/deploy.sh`
+
+Four additions applied in order. No existing logic is removed.
+
+#### 14.3-A — Add `SCRIPT_DIR` / `REPO_DIR`
+
+Immediately after `set -euo pipefail`, before the `# ── Constants` block:
+
+```bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+```
+
+#### 14.3-B — Add `.env` loading block
+
+After the `cleanup()`/`trap cleanup EXIT` lines, before `# ── Argument parsing`:
+
+```bash
+# ── Load .env ─────────────────────────────────────────────────────────────────
+ENV_FILE="${REPO_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ "${line}" =~ ^# || -z "${line}" ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val%%#*}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        val="${val#\"}" ; val="${val%\"}"
+        val="${val#\'}" ; val="${val%\'}"
+        case "${key}" in
+            NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO|NOMON_SERVICE_USER|NOMON_SERVICE_GROUP) \
+                export "${key}=${val}" ;;
+        esac
+    done < "${ENV_FILE}"
+fi
+```
+
+#### 14.3-C — Add `copy_nomopractic_env()` and service file upload
+
+After the `_rsh`/`_rscp`/`ON_REMOTE` block, before `echo "==> Installing binary..."`:
+
+```bash
+# ── Env file & service file ────────────────────────────────────────────────────
+# Vars excluded from the Pi's system env file — deploy secrets, not runtime config.
+_DEPLOY_EXCLUDE='^\s*(NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO)\s*='
+
+copy_nomopractic_env() {
+    if [[ ! -f "${ENV_FILE}" ]]; then
+        echo "==> Warning: .env not found; skipping /etc/nomopractic/nomopractic.env." >&2
+        return
+    fi
+    if [[ "${ON_REMOTE}" == true ]]; then
+        echo "==> Writing /etc/nomopractic/nomopractic.env on remote host..."
+        grep -vE "${_DEPLOY_EXCLUDE}" "${ENV_FILE}" | \
+            ssh "${SSH_OPTS[@]}" "${PI_HOST}" \
+                'sudo mkdir -p /etc/nomopractic && sudo tee /etc/nomopractic/nomopractic.env >/dev/null'
+    else
+        echo "==> Writing /etc/nomopractic/nomopractic.env locally..."
+        sudo mkdir -p /etc/nomopractic
+        grep -vE "${_DEPLOY_EXCLUDE}" "${ENV_FILE}" | \
+            sudo tee /etc/nomopractic/nomopractic.env >/dev/null
+    fi
+}
+
+copy_nomopractic_env
+
+# Upload service file template so the Pi can run envsubst on it.
+_SERVICE_FILE="${REPO_DIR}/systemd/nomopractic.service"
+REMOTE_SERVICE_TMP=""
+if [[ "${ON_REMOTE}" == true && -f "${_SERVICE_FILE}" ]]; then
+    REMOTE_SERVICE_TMP="/tmp/nomopractic.service.$$"
+    _rscp "${_SERVICE_FILE}" "${PI_HOST}:${REMOTE_SERVICE_TMP}"
+fi
+```
+
+#### 14.3-D — Remote heredoc: add service file install
+
+In the `_rsh bash <<REMOTE … REMOTE` block, make two changes:
+
+**1.** At the top of the heredoc, alongside the existing `INSTALL_PATH=`,
+`SERVICE=`, `REMOTE_TMP=`, `REMOTE_CONFIG_TMP=` variable injections, add:
+
+```bash
+REMOTE_SERVICE_TMP="${REMOTE_SERVICE_TMP}"
+_DEF_SVC_USER="${NOMON_SERVICE_USER:-root}"
+_DEF_SVC_GROUP="${NOMON_SERVICE_GROUP:-nomon}"
+```
+
+**2.** Before `echo "==> Restarting \${SERVICE}.service..."` inside the heredoc, add:
+
+```bash
+# Install service file with envsubst expansion of User= and Group=.
+if [[ -n "\${REMOTE_SERVICE_TMP}" ]]; then
+    echo "==> Installing nomopractic.service..."
+    NOMON_SERVICE_USER="\${_DEF_SVC_USER}"
+    NOMON_SERVICE_GROUP="\${_DEF_SVC_GROUP}"
+    if [[ -f /etc/nomopractic/nomopractic.env ]]; then
+        set -o allexport
+        source /etc/nomopractic/nomopractic.env
+        set +o allexport
+    fi
+    NOMON_SERVICE_USER="\${NOMON_SERVICE_USER:-root}"
+    NOMON_SERVICE_GROUP="\${NOMON_SERVICE_GROUP:-nomon}"
+    envsubst '$NOMON_SERVICE_USER $NOMON_SERVICE_GROUP' \
+        < "\${REMOTE_SERVICE_TMP}" \
+        | sudo tee /etc/systemd/system/nomopractic.service >/dev/null
+    rm -f "\${REMOTE_SERVICE_TMP}"
+    echo "==> Service file installed."
+fi
+```
+
+#### 14.3-E — Local branch: add service file install
+
+In the `else` branch (no `PI_HOST`), before
+`echo "==> Restarting ${SERVICE}.service..."`, add:
+
+```bash
+# Install service file with envsubst expansion of User= and Group=.
+if [[ -f "${_SERVICE_FILE}" ]]; then
+    echo "==> Installing nomopractic.service..."
+    if [[ -f /etc/nomopractic/nomopractic.env ]]; then
+        set -o allexport
+        # shellcheck source=/dev/null
+        source /etc/nomopractic/nomopractic.env
+        set +o allexport
+    fi
+    NOMON_SERVICE_USER="${NOMON_SERVICE_USER:-root}"
+    NOMON_SERVICE_GROUP="${NOMON_SERVICE_GROUP:-nomon}"
+    envsubst '$NOMON_SERVICE_USER $NOMON_SERVICE_GROUP' \
+        < "${_SERVICE_FILE}" \
+        | sudo tee /etc/systemd/system/nomopractic.service >/dev/null
+fi
+```
+
+---
+
+### Phase 14 Exit Criteria
+
+- `nomopractic/systemd/nomopractic.service` contains `User=${NOMON_SERVICE_USER}`,
+  `Group=${NOMON_SERVICE_GROUP}`, and `EnvironmentFile=-/etc/nomopractic/nomopractic.env`
+- After `./scripts/deploy.sh --local`:
+  - `cat /etc/nomopractic/nomopractic.env` contains no `NOMON_PI_HOST`,
+    `NOMON_SSH_KEY`, or `NOMON_GITHUB_REPO` lines
+  - `grep -E '^User=|^Group=' /etc/systemd/system/nomopractic.service` shows
+    literal expanded values (e.g. `User=root`, `Group=nomon`), not template vars
+  - `systemctl is-active nomopractic` → `active`
+- `cargo clippy -- -D warnings` — no warnings (no Rust changes)
+- `cargo fmt --check` — clean (no Rust changes)

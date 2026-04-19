@@ -4,8 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=nomon
+EnvironmentFile=-/etc/nomopractic/nomopractic.env
+User=${NOMON_SERVICE_USER}
+Group=${NOMON_SERVICE_GROUP}
 ExecStartPre=/bin/mkdir -p /run/nomopractic
 ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
 Restart=on-failure

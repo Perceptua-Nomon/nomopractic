@@ -86,15 +86,38 @@ src/
 │   ├── mod.rs       Routine engine (start/stop/status)
 │   └── explore.rs   Autonomous explore routine
 ├── ble/             BLE GATT server (behind `ble` feature flag)
-│   ├── mod.rs       GATT server lifecycle, advertising
-│   ├── protocol.rs  Binary frame codec
-│   ├── services.rs  GATT service + characteristic registration
-│   ├── session.rs   Pairing, HKDF key derivation, AES-CCM
-│   ├── bridge.rs    BLE command → IPC handler dispatch
-│   └── wifi.rs      WiFi provisioning (nmcli)
+│   ├── mod.rs       GATT server lifecycle, BlueZ passkey agent, advertising
+│   ├── services.rs  Single GATT service + 2 characteristics (Command Write, Response Notify)
+│   └── bridge.rs    NDJSON relay: accumulate chunks → dispatch → chunk response
+├── wifi.rs          WiFi control: nmcli scan/connect/status (WifiControl trait)
 ├── reset.rs         MCU reset (BCM5)
 └── testing.rs       Shared test mocks (MockI2c, MockGpio, MockAlsaControl)
 ```
+
+## BLE Pairing Setup
+
+The BLE GATT server uses OS-level Bluetooth passkey pairing (ADR-004). A 6-digit numeric
+passkey is read from the filesystem at startup.
+
+```bash
+# On the Pi, create the passkey file:
+sudo mkdir -p /var/lib/nomon
+echo "123456" | sudo tee /var/lib/nomon/pairing_secret > /dev/null
+sudo chmod 640 /var/lib/nomon/pairing_secret
+sudo chown root:nomon /var/lib/nomon/pairing_secret
+```
+
+Enable BLE in `config.toml`:
+
+```toml
+[ble]
+enabled = true
+device_name = "nomon"
+pairing_secret_path = "/var/lib/nomon/pairing_secret"
+```
+
+On mobile: scan for the device named "nomon", enter the 6-digit passkey when the OS prompts,
+then the app calls `authenticate` to receive a device-scoped JWT.
 
 ## Documentation
 

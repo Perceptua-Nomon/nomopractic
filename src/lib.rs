@@ -7,3 +7,4 @@ pub mod reset;
 pub mod routine;
 #[doc(hidden)]
 pub mod testing;
+pub mod wifi;

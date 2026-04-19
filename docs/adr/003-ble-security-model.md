@@ -1,8 +1,14 @@
 # ADR-003: BLE Security Model
 
+> ⚠️ **SUPERSEDED — Do not implement.**
+> This ADR describes application-layer AES-128-CCM encryption, HKDF key derivation, and a custom pairing ceremony that were fully replaced by [ADR-004: BLE Simplification — Native OS Pairing + NDJSON Relay](004-ble-simplification.md).
+> OS-level Bluetooth passkey pairing (BlueZ Passkey Entry, link-layer AES-CCM) replaces all app-layer crypto.
+> The `ble/session.rs` Rust module and `lib/ble-session.ts` TypeScript module described here have been deleted.
+> Retain this document for historical reference only.
+
 ## Status
 
-Accepted
+Superseded by [ADR-004](004-ble-simplification.md)
 
 ## Date
 

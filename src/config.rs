@@ -144,10 +144,8 @@ pub struct BleConfig {
     pub enabled: bool,
     /// BLE advertising device name (max 29 bytes per BLE spec).
     pub device_name: String,
-    /// Filesystem path to the shared pairing secret (read at pairing time).
+    /// Filesystem path to the numeric passkey file (6-digit, 000000–999999).
     pub pairing_secret_path: PathBuf,
-    /// Name of the environment variable holding the JWT signing secret.
-    pub jwt_secret_env: String,
 }
 
 impl Default for BleConfig {
@@ -156,7 +154,6 @@ impl Default for BleConfig {
             enabled: false,
             device_name: "nomon".into(),
             pairing_secret_path: PathBuf::from("/var/lib/nomon/pairing_secret"),
-            jwt_secret_env: "NOMON_JWT_SECRET".into(),
         }
     }
 }
@@ -808,7 +805,6 @@ steering = 5
             config.ble.pairing_secret_path,
             PathBuf::from("/var/lib/nomon/pairing_secret")
         );
-        assert_eq!(config.ble.jwt_secret_env, "NOMON_JWT_SECRET");
     }
 
     #[test]
@@ -821,7 +817,6 @@ steering = 5
 enabled = true
 device_name = "my-robot"
 pairing_secret_path = "/tmp/secret"
-jwt_secret_env = "MY_JWT_SECRET"
 "#
         )
         .unwrap();
@@ -829,7 +824,6 @@ jwt_secret_env = "MY_JWT_SECRET"
         assert!(config.ble.enabled);
         assert_eq!(config.ble.device_name, "my-robot");
         assert_eq!(config.ble.pairing_secret_path, PathBuf::from("/tmp/secret"));
-        assert_eq!(config.ble.jwt_secret_env, "MY_JWT_SECRET");
     }
 
     #[test]
