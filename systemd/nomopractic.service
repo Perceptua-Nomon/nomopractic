@@ -7,6 +7,10 @@ Type=simple
 EnvironmentFile=-/etc/nomopractic/nomopractic.env
 User=${NOMON_SERVICE_USER}
 Group=${NOMON_SERVICE_GROUP}
+# Let systemd create a runtime directory owned by the service user so the
+# daemon can bind the Unix socket without permission errors.
+RuntimeDirectory=nomopractic
+RuntimeDirectoryMode=0750
 ExecStartPre=/bin/mkdir -p /run/nomopractic
 ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
 Restart=on-failure
