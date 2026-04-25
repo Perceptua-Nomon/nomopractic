@@ -89,6 +89,6 @@ max_duration_s             = 300    # Auto-stop after this many seconds
 # See ADR-001 (GATT architecture), ADR-004 (BLE simplification).
 
 [ble]
-enabled             = false                          # Disabled by default; enable on Pi with BlueZ
-device_name         = "nomon"                        # BLE advertising name (max 29 bytes)
+enabled             = true # Disabled by default; enable on Pi with BlueZ
+device_name         = "perceptua" # BLE advertising name (max 29 bytes)
 pairing_secret_path = "/var/lib/nomon/pairing_secret" # 6-digit numeric passkey file (000000–999999)

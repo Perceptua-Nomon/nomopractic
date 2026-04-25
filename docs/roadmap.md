@@ -165,10 +165,12 @@ hardware interaction.
 - [x] Rollback support (keep previous binary as `nomopractic.bak`)
 
 ### 5.3 — Integration Testing on Pi
+- [ ] Integration testing still in progress
 - [x] End-to-end test: start daemon → connect via socket → verify HAT responses
 - [x] Battery voltage sanity check (voltage in expected range)
 - [x] Servo sweep test (0° → 180° → 0°)
 - [x] MCU reset test
+- [ ] Revisions to BLE pairing flow are needed
 
 **Results (v0.1.0, 2026-03-10, Pi Zero 2W / PicarX):**
 
@@ -365,6 +367,10 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 14 | Service Env-File & Deploy Hardening | ✅ Complete | — |
 
 ---
+
+Developer pairing notes:
+- `docs/pairing.md` — developer instructions for setting or verifying the passkey, making the controller discoverable, and basic troubleshooting.
+  Deploy and the `nomopractic` service will create/seed `/var/lib/nomon/pairing_secret` if missing; production installs should still provide a tmpfiles.d or package step to ensure directory ownership (root:nomon).
 
 ## Phase 8 — Peripheral Expansion (P1)
 

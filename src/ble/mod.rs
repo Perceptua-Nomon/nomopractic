@@ -25,6 +25,14 @@ use tracing::{error, info, warn};
 use crate::config::BleConfig;
 #[cfg(feature = "ble")]
 use crate::ipc::handler::Handler;
+#[cfg(feature = "ble")]
+use std::fs;
+#[cfg(feature = "ble")]
+use std::io::Read;
+#[cfg(feature = "ble")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(feature = "ble")]
+use std::path::Path;
 
 /// BLE server errors.
 #[cfg(feature = "ble")]
@@ -58,7 +66,7 @@ pub async fn start_ble_server(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), BleError> {
     use bluer::adv::Advertisement;
-    use bluer::agent::{Agent, AgentHandle, ReqError as AgentReqError};
+    use bluer::agent::{Agent, AgentHandle};
 
     let bt_session = bluer::Session::new().await?;
     let adapter = bt_session.default_adapter().await?;
@@ -71,22 +79,34 @@ pub async fn start_ble_server(
     );
 
     // Read the numeric passkey from the pairing secret file.
+    // Ensure a pairing secret exists so nomopractic can run standalone in
+    // developer/test environments where `nomothetic` may not have created
+    // the shared file yet. This attempts to create the directory and
+    // seed a random 6-digit passkey if the file is missing. Failures are
+    // non-fatal here (we'll surface them when reading the file below).
+    if let Err(e) = ensure_pairing_secret(&config.pairing_secret_path) {
+        warn!(error = %e, "could not ensure pairing secret exists; continuing and will attempt to read it")
+    }
+
     let passkey = read_passkey(&config.pairing_secret_path)?;
     info!(
         "BLE passkey loaded from {}",
         config.pairing_secret_path.display()
     );
 
-    // Register BlueZ passkey agent.
+    // Register BlueZ passkey agent and request that it become the default
+    // agent for passkey pairing.
     let agent = Agent {
+        request_default: true,
         request_passkey: Some(Box::new(move |_req| {
             let pk = passkey;
+            info!("BLE passkey requested by BlueZ agent");
             Box::pin(async move { Ok(pk) })
         })),
         ..Default::default()
     };
     let _agent_handle: AgentHandle = bt_session.register_agent(agent).await?;
-    info!("BlueZ passkey agent registered (KeyboardDisplay)");
+    info!("BlueZ passkey agent registered (KeyboardOnly)");
 
     // Build GATT application with single service.
     let (app, char_handles) = services::build_gatt_application();
@@ -126,6 +146,60 @@ pub async fn start_ble_server(
     Ok(())
 }
 
+/// Attempt to create the pairing secret file if it does not exist.
+///
+/// This will try to create the parent directory, write a random 6-digit
+/// numeric passkey, and set permissive permissions (0640). Errors are
+/// returned so callers can log or handle them; creation failures are not
+/// treated as fatal by callers to allow deployments that manage the
+/// directory via tmpfiles.d to proceed.
+#[cfg(feature = "ble")]
+fn ensure_pairing_secret(path: &Path) -> Result<(), std::io::Error> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            // try to create the directory; may fail if not permitted
+            fs::create_dir_all(parent)?;
+            // try to set reasonable directory permissions
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o750));
+        }
+    }
+
+    // Generate a 6-digit numeric passkey from /dev/urandom if available.
+    let pk = match fs::File::open("/dev/urandom") {
+        Ok(mut f) => {
+            let mut buf = [0u8; 4];
+            if f.read_exact(&mut buf).is_ok() {
+                u32::from_le_bytes(buf) % 1_000_000
+            } else {
+                // fallback to time-based seed
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+                    % 1_000_000) as u32
+            }
+        }
+        Err(_) => {
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+                % 1_000_000) as u32
+        }
+    };
+
+    let tmp = path.with_extension(".tmp");
+    fs::write(&tmp, format!("{:06}\n", pk))?;
+    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o640));
+    fs::rename(&tmp, path)?;
+    info!(path = %path.display(), "created pairing secret file");
+    Ok(())
+}
+
 /// Read the numeric passkey (000000–999999) from the pairing secret file.
 #[cfg(feature = "ble")]
 fn read_passkey(path: &std::path::Path) -> Result<u32, BleError> {
@@ -143,4 +217,41 @@ fn read_passkey(path: &std::path::Path) -> Result<u32, BleError> {
         )));
     }
     Ok(passkey)
+}
+
+#[cfg(all(test, feature = "ble"))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_passkey_ok() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        write!(tmp, "012345\n").expect("write passkey");
+        let pk = read_passkey(tmp.path()).expect("should parse passkey");
+        assert_eq!(pk, 12345);
+    }
+
+    #[test]
+    fn read_passkey_missing_file() {
+        let path = std::path::Path::new("/tmp/this_file_should_not_exist_hopefully");
+        let res = read_passkey(path);
+        assert!(matches!(res, Err(BleError::InvalidPasskey(_))));
+    }
+
+    #[test]
+    fn read_passkey_invalid_content() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        write!(tmp, "not-a-number").expect("write invalid");
+        let res = read_passkey(tmp.path());
+        assert!(matches!(res, Err(BleError::InvalidPasskey(_))));
+    }
+
+    #[test]
+    fn read_passkey_too_large() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        write!(tmp, "1000000").expect("write large");
+        let res = read_passkey(tmp.path());
+        assert!(matches!(res, Err(BleError::InvalidPasskey(_))));
+    }
 }

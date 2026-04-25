@@ -1,0 +1,4 @@
+# Use the locally-built cross image for aarch64 target so libdbus and other
+# arm64 dev packages are available during cross-compilation.
+[target.aarch64-unknown-linux-gnu]
+image = "nomopractic-cross-aarch64:latest"

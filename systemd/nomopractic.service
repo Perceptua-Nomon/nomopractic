@@ -1,6 +1,7 @@
 [Unit]
 Description=nomon HAT hardware daemon
-After=network.target
+After=network.target bluetooth.service
+Requires=bluetooth.service
 
 [Service]
 Type=simple
@@ -13,6 +14,8 @@ RuntimeDirectory=nomopractic
 RuntimeDirectoryMode=0750
 ExecStartPre=/bin/mkdir -p /run/nomopractic
 ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
+ExecStartPost=/bin/sh -c '/usr/bin/bluetoothctl discoverable-timeout 300 || true && /usr/bin/bluetoothctl pairable on || true && /usr/bin/bluetoothctl discoverable on || true'
+ExecStopPost=/usr/bin/bluetoothctl discoverable off || true
 Restart=on-failure
 RestartSec=2s
 Environment=RUST_LOG=info

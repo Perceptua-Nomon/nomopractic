@@ -96,11 +96,21 @@ src/
 
 ## BLE Pairing Setup
 
-The BLE GATT server uses OS-level Bluetooth passkey pairing (ADR-004). A 6-digit numeric
-passkey is read from the filesystem at startup.
+nomopractic uses OS-level Bluetooth passkey pairing (ADR-004) and an NDJSON
+relay over a single GATT service. The daemon reads a 6-digit numeric
+passkey from `pairing_secret_path` (default `/var/lib/nomon/pairing_secret`) at
+startup.
+
+Behavior added in this branch:
+- Deploy installs a `systemd-tmpfiles` entry to ensure `/var/lib/nomon` exists
+  with owner `root:nomon` and mode `0750`.
+- `nomopractic` will attempt to create and seed `/var/lib/nomon/pairing_secret`
+  with a random 6-digit passkey (mode `0640`) if the file is missing so the
+  daemon can run standalone for developer testing.
+
+Manual creation (optional):
 
 ```bash
-# On the Pi, create the passkey file:
 sudo mkdir -p /var/lib/nomon
 echo "123456" | sudo tee /var/lib/nomon/pairing_secret > /dev/null
 sudo chmod 640 /var/lib/nomon/pairing_secret
@@ -116,8 +126,10 @@ device_name = "nomon"
 pairing_secret_path = "/var/lib/nomon/pairing_secret"
 ```
 
-On mobile: scan for the device named "nomon", enter the 6-digit passkey when the OS prompts,
-then the app calls `authenticate` to receive a device-scoped JWT.
+On mobile: scan for the device named as configured and use an LE-capable
+client (native OS pairing, nRF Connect, LightBlue) to initiate an LE GATT
+connection — when the BlueZ agent is invoked the passkey returned will match
+the file contents and the app can call `authenticate` to receive a device-scoped JWT.
 
 ## Documentation
 

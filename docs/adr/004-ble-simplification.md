@@ -215,3 +215,15 @@ When a device attempts to pair, the agent reads the numeric passkey from
 - BlueZ agent API: https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/doc/agent-api.txt
 - `bluer` agent module: https://docs.rs/bluer/latest/bluer/agent/index.html
 - BLE 4.2 Security Manager spec (Passkey Entry pairing)
+
+## Implementation Status & Verification
+
+- **Runtime implementation**: `nomopractic` contains the simplified BLE server: `src/ble/mod.rs` (agent registration + lifecycle), `src/ble/services.rs` (single service with Command Write + Response Notify), and `src/ble/bridge.rs` (NDJSON relay and chunking).
+- **Tests added**: unit tests for `read_passkey()` and a gated integration test scaffold `tests/ble_pairing_integration.rs` (runs only with `--features ble` and `NOMON_RUN_BLE_INTEGRATION=1`).
+- **Docs updated**: ADR-002 and ADR-003 are superseded; this ADR documents the current choice and migration.
+- **Operational notes discovered during verification**:
+  - Some Bluetooth controllers / BlueZ configurations do **not** permit disabling BR/EDR at runtime (`btmgmt bredr off` may be rejected). As a result, BR/EDR may remain available even when LE is used. Design the pairing UX and operator guidance accordingly.
+  - The systemd unit is updated to require and start after `bluetooth.service` so that `bluetoothctl discoverable` commands (used at startup/deploy) reliably apply.
+  - Logging hardened: the numeric passkey is no longer emitted as a structured log field.
+
+-- **Remaining work**: finalise CI gating for BLE integration tests (hardware-gated or lab runner), sync nomotactic UI expectations with ADR-004, and implement an explicit `reset_pairing` operator action for device transfer scenarios. The previously-provisioned developer smoke scripts and lab-only Python client were removed from the repository; prefer a managed BLE gateway harness for automated lab verification.
