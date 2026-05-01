@@ -9,9 +9,9 @@
 
 use bluer::Uuid;
 use bluer::gatt::local::{
-    Application, Characteristic, CharacteristicControl, CharacteristicControlEvent,
-    CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicWrite,
-    CharacteristicWriteMethod, ReqError, Service, characteristic_control,
+    Application, Characteristic, CharacteristicControl, CharacteristicNotify,
+    CharacteristicNotifyMethod, CharacteristicWrite, CharacteristicWriteMethod, ReqError, Service,
+    characteristic_control,
 };
 use tokio::sync::mpsc;
 

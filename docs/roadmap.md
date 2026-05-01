@@ -170,7 +170,7 @@ hardware interaction.
 - [x] Battery voltage sanity check (voltage in expected range)
 - [x] Servo sweep test (0° → 180° → 0°)
 - [x] MCU reset test
-- [ ] Revisions to BLE pairing flow are needed
+- [x] BLE pairing flow revisions completed in Phase 13
 
 **Results (v0.1.0, 2026-03-10, Pi Zero 2W / PicarX):**
 

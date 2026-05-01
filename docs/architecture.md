@@ -195,7 +195,9 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `wifi_scan` | — | `networks: [{ ssid, signal, security }]` |
 | `wifi_connect` | `ssid`, `password` | `success` |
 | `wifi_status` | — | `state`, `ssid?`, `signal?` |
-| `authenticate` | — | `jwt`, `expires_in` (transport-agnostic) |
+| `authenticate` | — | `token`, `expires_at` (transport-agnostic) |
+| `read_gpio` | `pin` | `pin`, `high` |
+| `write_gpio` | `pin`, `high` | `pin`, `high` |
 
 ### BLE NDJSON Relay (Phase 13.1)
 

@@ -35,7 +35,7 @@ Quick steps
 
    {"id":"1","method":"authenticate","params":{}}
 
-   Expect `ok:true` and a `result.jwt` field in the JSON response.
+   Expect `ok:true` and a `result.token` field in the JSON response.
 
 Troubleshooting
 - If you do not see a passkey prompt on the phone:

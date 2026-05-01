@@ -19,8 +19,17 @@ hardware knowledge — it only sends/receives IPC messages.
 |---------|---------|
 | Battery voltage | ADC channel A4, scaled reading |
 | Servo control | 12 PWM channels, angle or pulse-width, TTL safety lease |
+| DC motor control | 4 channels, speed percentage, TTL safety lease |
+| Named vehicle methods | `drive`, `steer`, `pan_camera`, `tilt_camera` |
+| Grayscale sensors | 3 ADC channels, raw + normalized readings, calibration |
+| Ultrasonic sensor | Distance measurement in cm |
+| Audio | Speaker enable/disable, volume and mic gain via ALSA |
+| Calibration | Per-motor, per-servo, and grayscale calibration; persist to TOML |
+| Routines | Built-in obstacle-avoidance and line-following autonomous routines |
 | MCU reset | Assert/release BCM5 GPIO |
-| Named GPIO | D4, D5, MCURST, SW, LED |
+| Named GPIO | D4, D5, MCURST, SW, LED — read/write via IPC |
+| WiFi | Scan networks, connect, status |
+| BLE | GATT server (ADR-004): NDJSON relay over Command Write + Response Notify characteristics |
 | IPC | Unix socket + NDJSON at `/run/nomopractic/nomopractic.sock` |
 | Config | TOML file + `NOMON_HAT_*` env var overrides |
 

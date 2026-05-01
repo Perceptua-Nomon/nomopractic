@@ -28,9 +28,7 @@ use nomopractic::testing::{MockAlsaControl, MockGpio, MockI2c};
 #[tokio::test]
 async fn ble_server_registers_agent_and_advertises() {
     if std::env::var("NOMON_RUN_BLE_INTEGRATION").is_err() {
-        eprintln!(
-            "Skipping BLE integration test; set NOMON_RUN_BLE_INTEGRATION=1 to run"
-        );
+        eprintln!("Skipping BLE integration test; set NOMON_RUN_BLE_INTEGRATION=1 to run");
         return;
     }
 
@@ -46,7 +44,10 @@ async fn ble_server_registers_agent_and_advertises() {
     ble_cfg.pairing_secret_path = passfile.clone();
 
     // Full Config for Handler; use defaults but with our BleConfig set.
-    let full_cfg = FullConfig { ble: ble_cfg.clone(), ..Default::default() };
+    let full_cfg = FullConfig {
+        ble: ble_cfg.clone(),
+        ..Default::default()
+    };
     let cfg = Arc::new(full_cfg);
 
     // Create handler with mock dependencies (no real hardware required).

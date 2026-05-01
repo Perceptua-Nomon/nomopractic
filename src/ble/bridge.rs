@@ -20,6 +20,7 @@ use crate::ipc::handler::Handler;
 /// Distinct from the routine engine's `ROUTINE_CONN_ID = 0`.
 pub const BLE_CONN_ID: u64 = 1;
 
+// Assumes negotiated MTU ≥ 244 (ATT overhead = 3 bytes); client requests MTU 247.
 /// Default ATT payload size: negotiated MTU (244) minus ATT header (3).
 const DEFAULT_CHUNK_SIZE: usize = 241;
 
@@ -86,6 +87,7 @@ pub async fn run_json_relay(
                             }
                         }
                     } else {
+                        // NOTE: clients must subscribe to Response Notify before writing commands; responses are silently dropped when no subscriber is registered.
                         warn!("no BLE response subscriber — response dropped");
                     }
                 }

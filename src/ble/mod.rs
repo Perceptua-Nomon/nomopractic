@@ -11,6 +11,8 @@
 #[cfg(feature = "ble")]
 pub mod bridge;
 #[cfg(feature = "ble")]
+pub use bridge::BLE_CONN_ID;
+#[cfg(feature = "ble")]
 pub mod services;
 
 #[cfg(feature = "ble")]
@@ -159,13 +161,13 @@ fn ensure_pairing_secret(path: &Path) -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            // try to create the directory; may fail if not permitted
-            fs::create_dir_all(parent)?;
-            // try to set reasonable directory permissions
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o750));
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        // try to create the directory; may fail if not permitted
+        fs::create_dir_all(parent)?;
+        // try to set reasonable directory permissions
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o750));
     }
 
     // Generate a 6-digit numeric passkey from /dev/urandom if available.
@@ -175,20 +177,22 @@ fn ensure_pairing_secret(path: &Path) -> Result<(), std::io::Error> {
             if f.read_exact(&mut buf).is_ok() {
                 u32::from_le_bytes(buf) % 1_000_000
             } else {
+                // NOTE: This fallback is only reached on non-Linux dev machines where /dev/urandom is unavailable; entropy quality is intentionally low in that case.
                 // fallback to time-based seed
-                (std::time::SystemTime::now()
+                std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .subsec_nanos()
-                    % 1_000_000) as u32
+                    % 1_000_000
             }
         }
         Err(_) => {
-            (std::time::SystemTime::now()
+            // NOTE: This fallback is only reached on non-Linux dev machines where /dev/urandom is unavailable; entropy quality is intentionally low in that case.
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos()
-                % 1_000_000) as u32
+                % 1_000_000
         }
     };
 
