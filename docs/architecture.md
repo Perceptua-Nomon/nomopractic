@@ -196,6 +196,26 @@ pairing). See `systemd/nomon-softap.service` and
 `systemd/nomon-softap-watchdog.timer` for the service units. Refer to
 nomopractic ADR-005 for the full design rationale.
 
+### End-to-End Provisioning Sequence
+
+1. **Device boots off-network** → `nomon-softap.service` calls `ap-mode.sh up`
+   → hotspot `nomon-<last4>` broadcasts at `192.168.4.1`
+2. **User connects** phone or laptop to `nomon-<last4>` using the 6-digit
+   pairing secret as the Wi-Fi password
+3. **User opens browser / app** → reaches nomothetic at `https://192.168.4.1:8443`
+4. **Pairing** → user submits pairing secret to `POST /api/device/auth/pair`
+   → nomothetic issues a device JWT
+5. **Wi-Fi provisioning** → app reveals `WifiProvisionForm`; user enters home
+   SSID + WPA2 password → app calls `POST /api/device/network/configure`
+6. **Background connection** → nomothetic launches `nmcli device wifi connect
+   <ssid> password <pwd> ifname wlan0` as an `asyncio` background task; returns
+   `{"status":"connecting"}` immediately. NM stores a persistent connection
+   profile so the device reconnects automatically on future boots.
+7. **AP teardown** → `nomon-softap-watchdog.service` polls `nmcli general
+   connectivity` every 30 s; when it reaches `full`, calls `ap-mode.sh down`
+8. **Subsequent boots** → NM connects to home network immediately; AP only
+   activates if home network is unreachable
+
 ### Error Codes
 
 | Code | Meaning |
