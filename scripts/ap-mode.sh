@@ -9,7 +9,7 @@
 # The SSID is derived from the last 4 hex digits of the wlan0 MAC address.
 # The WPA2 passphrase is read from NOMON_PAIRING_SECRET_PATH (default:
 # /var/lib/nomon/pairing_secret). The AP is served at 192.168.4.1 with
-# dnsmasq providing DHCP on 192.168.4.0/24.
+# NetworkManager shared-mode DHCP (`ipv4.method shared`) on 192.168.4.0/24.
 
 set -euo pipefail
 
@@ -43,8 +43,9 @@ _get_passphrase() {
     fi
     local secret
     secret=$(tr -d '[:space:]' < "${PAIRING_SECRET_PATH}")
-    if [[ ${#secret} -lt 8 ]]; then
-        echo "ERROR: pairing secret must be at least 8 characters (WPA2 minimum)" >&2
+    # nomon uses a 6-digit PIN on a private AP; reject only empty/trivially short values.
+    if [[ ${#secret} -lt 6 ]]; then
+        echo "ERROR: pairing secret must be at least 6 characters" >&2
         exit 1
     fi
     echo "${secret}"

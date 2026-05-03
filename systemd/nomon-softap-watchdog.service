@@ -19,3 +19,6 @@ ExecStart=/bin/bash -c '\
     fi'
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=nomon-softap-watchdog.timer
