@@ -1,0 +1,21 @@
+[Unit]
+Description=nomon Wi-Fi Soft AP watchdog
+Documentation=https://github.com/Perceptua-Nomon/nomopractic
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+# If the device has full internet connectivity, the AP is not needed.
+# If connectivity is not full and the AP is not up, activate it.
+ExecStart=/bin/bash -c '\
+    CONNECTIVITY=$(nmcli -t general connectivity 2>/dev/null || echo none); \
+    if [ "$CONNECTIVITY" = "full" ]; then \
+        /usr/local/bin/ap-mode.sh down; \
+    else \
+        AP_STATUS=$(/usr/local/bin/ap-mode.sh status 2>/dev/null || echo down); \
+        if [ "$AP_STATUS" != "up" ]; then \
+            /usr/local/bin/ap-mode.sh up; \
+        fi; \
+    fi'
+StandardOutput=journal
+StandardError=journal

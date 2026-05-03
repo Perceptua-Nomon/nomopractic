@@ -8,7 +8,7 @@
 
 ## Status
 
-Superseded by [ADR-004](004-ble-simplification.md)
+Superseded by [ADR-004](004-ble-simplification.md) and [ADR-005](005-wifi-soft-ap.md)
 
 ## Date
 

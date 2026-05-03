@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-005](005-wifi-soft-ap.md)
 
 ## Date
 

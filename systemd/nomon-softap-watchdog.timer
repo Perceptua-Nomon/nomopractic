@@ -1,0 +1,11 @@
+[Unit]
+Description=nomon Wi-Fi Soft AP watchdog timer
+Documentation=https://github.com/Perceptua-Nomon/nomopractic
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+Unit=nomon-softap-watchdog.service
+
+[Install]
+WantedBy=timers.target

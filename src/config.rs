@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
+
+
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -132,32 +134,6 @@ impl Default for UltrasonicConfig {
     }
 }
 
-/// BLE GATT server configuration.
-///
-/// When `enabled` is `true` and the binary is compiled with the `ble` Cargo
-/// feature, the daemon starts a BLE GATT server for mobile pairing and
-/// fallback control.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct BleConfig {
-    /// Whether the BLE GATT server is enabled.
-    pub enabled: bool,
-    /// BLE advertising device name (max 29 bytes per BLE spec).
-    pub device_name: String,
-    /// Filesystem path to the numeric passkey file (6-digit, 000000–999999).
-    pub pairing_secret_path: PathBuf,
-}
-
-impl Default for BleConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            device_name: "nomon".into(),
-            pairing_secret_path: PathBuf::from("/var/lib/nomon/pairing_secret"),
-        }
-    }
-}
-
 /// Configuration for autonomous on-robot routines.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct RoutineConfig {
@@ -226,9 +202,6 @@ pub struct Config {
     /// Autonomous routine configuration.
     #[serde(default)]
     pub routine: RoutineConfig,
-    /// BLE GATT server configuration.
-    #[serde(default)]
-    pub ble: BleConfig,
 }
 
 impl Default for Config {
@@ -264,7 +237,6 @@ impl Default for Config {
             audio: AudioConfig::default(),
             calibration_path: PathBuf::from("/etc/nomopractic/calibration.toml"),
             routine: RoutineConfig::default(),
-            ble: BleConfig::default(),
         }
     }
 }
@@ -343,12 +315,6 @@ impl Config {
         }
         if let Ok(v) = get_env("NOMON_HAT_CALIBRATION_PATH") {
             self.calibration_path = PathBuf::from(v);
-        }
-        if let Ok(v) = get_env("NOMON_BLE_ENABLED") {
-            self.ble.enabled = v.eq_ignore_ascii_case("true") || v == "1";
-        }
-        if let Ok(v) = get_env("NOMON_BLE_DEVICE_NAME") {
-            self.ble.device_name = v;
         }
     }
 
@@ -472,23 +438,6 @@ impl Config {
             return Err(ConfigError::Validation {
                 field: "routine.loop_interval_ms",
                 reason: format!("{} is below minimum 50 ms", self.routine.loop_interval_ms),
-            });
-        }
-        // Validate BLE configuration.
-        if self.ble.device_name.len() > 29 {
-            return Err(ConfigError::Validation {
-                field: "ble.device_name",
-                reason: format!(
-                    "device name '{}' is {} bytes, max 29 (BLE advertising limit)",
-                    self.ble.device_name,
-                    self.ble.device_name.len()
-                ),
-            });
-        }
-        if self.ble.device_name.is_empty() {
-            return Err(ConfigError::Validation {
-                field: "ble.device_name",
-                reason: "device name must not be empty".into(),
             });
         }
         Ok(())
@@ -792,88 +741,5 @@ steering = 5
         write!(f, "{}", routine_toml("loop_interval_ms", "49")).unwrap();
         let err = Config::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("loop_interval_ms"));
-    }
-
-    // ── BLE config tests ───────────────────────────────────────────────
-
-    #[test]
-    fn ble_config_defaults() {
-        let config = Config::default();
-        assert!(!config.ble.enabled);
-        assert_eq!(config.ble.device_name, "nomon");
-        assert_eq!(
-            config.ble.pairing_secret_path,
-            PathBuf::from("/var/lib/nomon/pairing_secret")
-        );
-    }
-
-    #[test]
-    fn ble_config_from_toml() {
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(
-            f,
-            r#"
-[ble]
-enabled = true
-device_name = "my-robot"
-pairing_secret_path = "/tmp/secret"
-"#
-        )
-        .unwrap();
-        let config = Config::load(f.path()).unwrap();
-        assert!(config.ble.enabled);
-        assert_eq!(config.ble.device_name, "my-robot");
-        assert_eq!(config.ble.pairing_secret_path, PathBuf::from("/tmp/secret"));
-    }
-
-    #[test]
-    fn ble_config_partial_toml_uses_defaults() {
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "[ble]\nenabled = true").unwrap();
-        let config = Config::load(f.path()).unwrap();
-        assert!(config.ble.enabled);
-        assert_eq!(config.ble.device_name, "nomon");
-    }
-
-    #[test]
-    fn ble_device_name_too_long_rejected() {
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(
-            f,
-            "[ble]\ndevice_name = \"this-name-is-way-too-long-for-ble\""
-        )
-        .unwrap();
-        let err = Config::load(f.path()).unwrap_err();
-        assert!(err.to_string().contains("ble.device_name"));
-    }
-
-    #[test]
-    fn ble_device_name_empty_rejected() {
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "[ble]\ndevice_name = \"\"").unwrap();
-        let err = Config::load(f.path()).unwrap_err();
-        assert!(err.to_string().contains("ble.device_name"));
-    }
-
-    #[test]
-    fn ble_env_overrides() {
-        let mut config = Config::default();
-        config.apply_env_overrides(|key| match key {
-            "NOMON_BLE_ENABLED" => Ok("true".into()),
-            "NOMON_BLE_DEVICE_NAME" => Ok("test-bot".into()),
-            _ => Err(env::VarError::NotPresent),
-        });
-        assert!(config.ble.enabled);
-        assert_eq!(config.ble.device_name, "test-bot");
-    }
-
-    #[test]
-    fn ble_env_enabled_accepts_one() {
-        let mut config = Config::default();
-        config.apply_env_overrides(|key| match key {
-            "NOMON_BLE_ENABLED" => Ok("1".into()),
-            _ => Err(env::VarError::NotPresent),
-        });
-        assert!(config.ble.enabled);
     }
 }
