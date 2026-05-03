@@ -353,6 +353,7 @@ echo "==> Installing Soft AP systemd units..."
 for _unit in nomon-softap.service nomon-softap-watchdog.service nomon-softap-watchdog.timer; do
     sudo cp "/tmp/${_unit}.$$" "/etc/systemd/system/${_unit}"
     sudo chmod 644 "/etc/systemd/system/${_unit}"
+    rm -f "/tmp/${_unit}.$$"
     echo "==> ${_unit} installed ✓"
 done
 sudo systemctl enable nomon-softap-watchdog.timer
