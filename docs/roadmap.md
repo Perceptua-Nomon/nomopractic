@@ -1314,3 +1314,15 @@ antenna contention.
 - [x] When Pi has no known network: `nomon-<last4>` AP appears within 30 s,
       `https://192.168.4.1:8443/api/device/auth/status` is reachable from a
       connected client
+
+### Phase 15.8 — Wi-Fi Credential Provisioning (cross-repo)
+
+> **Note:** No nomopractic source changes. The `nomon-softap-watchdog.service`
+> + `ap-mode.sh` already handle AP teardown once `nmcli general connectivity`
+> reaches `full` — this is the mechanism that shuts down the AP after the user
+> provisions home Wi-Fi via the nomothetic endpoint.
+
+- [x] `nomon-softap-watchdog.service` handles AP teardown on full connectivity ✅
+- [x] `docs/architecture.md`: updated to document end-to-end provisioning flow
+
+**Cross-repo:** nomothetic Phase 20.4
