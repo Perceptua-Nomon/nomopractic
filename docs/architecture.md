@@ -82,12 +82,10 @@ main.rs
   │   ├── mod.rs          (RoutineEngine, RoutineState, RoutineStats)
   │   └── explore.rs      (explore_task: ultrasonic + normalised grayscale sensor-actuator loop)
   ├── ble/                (BLE GATT server — behind `ble` Cargo feature flag)
-  │   ├── mod.rs          (GATT server lifecycle, advertising, connection events)
-  │   ├── protocol.rs     (binary frame codec: opcode/seq/length/payload)
-  │   ├── services.rs     (GATT service + characteristic registration)
-  │   ├── session.rs      (pairing, HKDF key derivation, AES-CCM encrypt/decrypt)
-  │   ├── bridge.rs       (BLE binary command → IPC handler dispatch)
-  │   └── wifi.rs         (WiFi provisioning: nmcli scan/connect/status)
+  │   ├── mod.rs          (GATT server lifecycle, BlueZ passkey agent, advertising)
+  │   ├── services.rs     (single GATT service + 2 characteristics: Command Write, Response Notify)
+  │   └── bridge.rs       (NDJSON relay: accumulate chunks → Handler::dispatch() → chunk response)
+  ├── wifi.rs             (WiFi control: nmcli scan/connect/status — WifiControl trait)
   ├── reset.rs            (MCU reset via BCM5)
   └── testing.rs          (shared test mocks: MockI2c, MockGpio, MockAlsaControl — #[cfg(test)] only)
 ```
@@ -101,7 +99,8 @@ main.rs
 5. No module depends on `main.rs` — all logic is in `lib.rs`.
 6. `ble/` depends on `ipc/handler.rs` for command dispatch (same handler serves
    both Unix socket IPC and BLE GATT commands).
-7. `ble/` modules depend only on `bluer` and RustCrypto crates; no `hat/` imports.
+7. `ble/` modules depend only on `bluer`; no `hat/` imports, no crypto crates.
+8. `wifi.rs` has no internal dependencies (uses `std::process::Command` for nmcli).
 
 ## Data Flow
 
@@ -193,33 +192,36 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 | `start_routine` | `name`, `speed_pct?`, `obstacle_threshold_cm?`, `cliff_threshold_normalized?`, `max_duration_s?` | `name`, `started_at_uptime_s` |
 | `stop_routine` | — | `name`, `ran_for_s`, `obstacles_avoided`, `cliffs_avoided`, `stop_reason` |
 | `get_routine_status` | — | `running`, `name?`, `elapsed_s?`, `obstacles_avoided?`, `cliffs_avoided?` |
+| `wifi_scan` | — | `networks: [{ ssid, signal, security }]` |
+| `wifi_connect` | `ssid`, `password` | `success` |
+| `wifi_status` | — | `state`, `ssid?`, `signal?` |
+| `authenticate` | — | `token`, `expires_at` (transport-agnostic) |
+| `read_gpio` | `pin` | `pin`, `high` |
+| `write_gpio` | `pin`, `high` | `pin`, `high` |
 
-### BLE Binary Protocol (Phase 13)
+### BLE NDJSON Relay (Phase 13.1)
 
-BLE commands use a compact binary protocol over GATT characteristics instead
-of NDJSON. See ADR-002 for the full specification.
+BLE commands use the **same NDJSON framing** as the Unix socket IPC path
+(ADR-004). OS-level Bluetooth passkey pairing provides authentication and
+link-layer encryption. A single GATT service with 2 characteristics replaces
+the original 4-service binary protocol layout.
 
 **Transport:** BLE GATT characteristics (write + notify)
-**Framing:** 3-byte header (opcode, seq_nr, length) + payload
-**Encoding:** Little-endian, fixed-point scaled integers
-**Security:** AES-128-CCM encryption after pairing (see ADR-003)
-**Max frame:** 244 bytes (BLE 4.2 ATT MTU)
+**Framing:** NDJSON — identical to Unix socket IPC
+**Security:** OS-level Bluetooth passkey pairing + link-layer AES-CCM
+**Max message:** No fixed limit (NDJSON chunked at MTU boundary)
 
-The BLE binary opcode set maps 1:1 to a subset of the NDJSON IPC methods.
-The bridge layer (`ble/bridge.rs`) translates between the two encodings.
+The BLE bridge (`ble/bridge.rs`) accumulates NDJSON chunks from the Command
+Write characteristic, dispatches complete JSON lines through the same
+`Handler::dispatch()` used by Unix socket IPC, and sends the NDJSON response
+back via Response Notify (chunked if needed).
 
-| BLE Opcode | NDJSON Method | Direction |
-|------------|---------------|-----------|
-| `0x01` Heartbeat | `health` | req → resp |
-| `0x02` GetBattery | `get_battery_voltage` | req → resp |
-| `0x03` SetMotorSpeed | `set_motor_speed` | req → ack |
-| `0x04` StopAllMotors | `stop_all_motors` | req → ack |
-| `0x05` SetServoAngle | `set_servo_angle` | req → ack |
-| `0x06` Drive | `drive` | req → ack |
-| `0x07` Steer | `steer` | req → ack |
-| `0x08` ReadUltrasonic | `read_ultrasonic` | req → resp |
-| `0x09` ReadGrayscale | `read_grayscale` | req → resp |
-| `0x0A` GetHealth | `health` | req → resp |
+| GATT Characteristic | UUID | Direction |
+|---------------------|------|-----------|
+| Command Write | `e3a12001-…` | Client → Server (NDJSON request) |
+| Response Notify | `e3a12002-…` | Server → Client (NDJSON response) |
+
+All 39 IPC methods are available over BLE — no per-method codec required.
 
 ### Error Codes
 
@@ -259,12 +261,13 @@ See `config.toml` for all options.
 - Socket created with mode `0660`, group `nomon`.
 - Daemon runs as root (required for I2C/GPIO), socket restricted to `nomon` group.
 - No network listeners — Unix socket only (kernel-enforced access control).
-- BLE GATT server (Phase 13): app-layer authentication via pairing secret +
-  AES-128-CCM session encryption. See ADR-003 for the full security model.
-  - Pairing secret: single-use, constant-time compare.
-  - Session key: HKDF-SHA256 derived from pairing secret + random salt.
-  - All post-pairing BLE commands encrypted with AES-128-CCM.
-  - JWT issued over BLE is valid for HTTPS (shared secret with nomothetic).
+- BLE GATT server (Phase 13.1): OS-level Bluetooth passkey pairing via BlueZ
+  agent. See ADR-004 for the simplified security model.
+  - Passkey Entry: 6-digit numeric code read from `pairing_secret_path`.
+  - Link-layer AES-CCM encryption provided by OS bonding (replaces app-layer crypto).
+  - JWT issued via `authenticate` IPC method after bonding; valid for HTTPS
+    (shared `NOMON_JWT_SECRET` with nomothetic).
+  - NDJSON commands over BLE — same format and validation as Unix socket IPC.
 - Servo TTL lease prevents stall on client crash.
 - Input validation on all IPC parameters (channel range, pulse range, etc.).
 

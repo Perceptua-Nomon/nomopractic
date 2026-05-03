@@ -56,6 +56,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 REPO="${NOMON_GITHUB_REPO:-Perceptua-Nomon/nomopractic}"
@@ -67,6 +70,42 @@ cleanup() {
     rm -rf "$DOWNLOAD_DIR"
 }
 trap cleanup EXIT
+
+# Deploy-only variables that must NOT be written to the on-device env file.
+_DEPLOY_EXCLUDE='^\s*(NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO)\s*='
+
+# ── Load .env ──────────────────────────────────────────────────────────────────
+
+ENV_FILE="${REPO_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ "${line}" =~ ^# || -z "${line}" ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val%%#*}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        val="${val#\"}" ; val="${val%\"}"
+        val="${val#\'}"; val="${val%\'}"
+        case "${key}" in
+            NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO|NOMON_SERVICE_USER|NOMON_SERVICE_GROUP)
+                export "${key}=${val}" ;;
+        esac
+    done < "${ENV_FILE}"
+fi
+
+# Sanitize env-derived host/key values to remove any stray CR/LF or surrounding
+# whitespace that may be present when editing .env on Windows or other editors.
+NOMON_PI_HOST="${NOMON_PI_HOST:-}"
+NOMON_SSH_KEY="${NOMON_SSH_KEY:-}"
+# Remove CR and LF, trim leading/trailing whitespace
+NOMON_PI_HOST="$(printf '%s' "${NOMON_PI_HOST}" | tr -d '\r\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+NOMON_SSH_KEY="$(printf '%s' "${NOMON_SSH_KEY}" | tr -d '\r\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+
+# Export cleaned values so later logic picks them up via ${NOMON_PI_HOST} etc.
+export NOMON_PI_HOST NOMON_SSH_KEY
+
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -80,6 +119,9 @@ if [[ "${VERSION}" == "--local" ]]; then
     VERSION=""
     PI_HOST="${2:-${NOMON_PI_HOST:-}}"
 fi
+
+# Sanitize PI_HOST (remove any stray CR/LF and surrounding whitespace)
+PI_HOST="$(printf '%s' "${PI_HOST}" | tr -d '\r\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
 
 if [[ -n "${VERSION}" && ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Error: version must start with 'v' followed by semver (e.g. v0.2.0)" >&2
@@ -102,8 +144,15 @@ if [[ "${BUILD_LOCAL}" == true ]]; then
         echo "Error: 'cross' command not found. Install it with: cargo install cross" >&2
         exit 2
     fi
-    
-    if ! cross build --target aarch64-unknown-linux-gnu --release; then
+
+    # If CROSS_CONTAINER is set, export it so `cross` will use that container image.
+    if [[ -n "${CROSS_CONTAINER:-}" ]]; then
+        export CROSS_CONTAINER="${CROSS_CONTAINER}"
+        echo "==> Using cross container: ${CROSS_CONTAINER}"
+    fi
+
+    # Allow passing additional cargo flags (e.g. --features ble)
+    if ! cross build --target aarch64-unknown-linux-gnu --release ${CARGO_BUILD_FLAGS:-}; then
         echo "Error: cross-compilation failed" >&2
         exit 2
     fi
@@ -177,7 +226,37 @@ else
     _rscp() { cp "$1" "$2"; }  # local "scp" = cp
     ON_REMOTE=false
 fi
+copy_nomopractic_env() {
+    if [[ ! -f "${ENV_FILE}" ]]; then
+        echo "==> Warning: .env not found; skipping /etc/nomopractic/nomopractic.env creation." >&2
+        return
+    fi
 
+    local filtered
+    filtered="$(grep -vE "${_DEPLOY_EXCLUDE}" "${ENV_FILE}" \
+        | grep -vE '^\s*#' \
+        | grep -vE '^\s*$' || true)"
+
+    if [[ -z "${filtered}" ]]; then
+        echo "==> No deploy-safe env vars found; skipping /etc/nomopractic/nomopractic.env creation." >&2
+        return
+    fi
+
+    if [[ -n "${PI_HOST}" ]]; then
+        echo "==> Writing /etc/nomopractic/nomopractic.env on remote host..."
+        # Write to a local temp file, copy it to the remote host, then move into place with sudo.
+        local tmp_env_file
+        tmp_env_file="$(mktemp)"
+        printf '%s\n' "${filtered}" > "${tmp_env_file}"
+        _rscp "${tmp_env_file}" "${PI_HOST}:/tmp/nomopractic_env.$$"
+        _rsh "sudo mkdir -p /etc/nomopractic && sudo mv -f /tmp/nomopractic_env.$$ /etc/nomopractic/nomopractic.env && sudo chmod 644 /etc/nomopractic/nomopractic.env"
+        rm -f "${tmp_env_file}"
+    else
+        echo "==> Writing /etc/nomopractic/nomopractic.env locally..."
+        sudo mkdir -p /etc/nomopractic
+        printf '%s\n' "${filtered}" | sudo tee /etc/nomopractic/nomopractic.env > /dev/null
+    fi
+}
 # ── Remote or local installation ─────────────────────────────────────────────
 
 install_binary() {
@@ -198,6 +277,16 @@ install_binary() {
     echo "==> Installed to ${INSTALL_PATH}"
 }
 
+copy_nomopractic_env
+
+REMOTE_SVC_TMP="/tmp/nomopractic_service.$$"
+REMOTE_TMPFILES="/tmp/nomon_tmpfiles.conf.$$"
+if [[ "$ON_REMOTE" == true ]]; then
+    _rscp "${REPO_DIR}/systemd/nomopractic.service" "${PI_HOST}:${REMOTE_SVC_TMP}"
+    # copy tmpfiles entry so remote deploy installs it
+    _rscp "${REPO_DIR}/systemd/tmpfiles.d/nomon.conf" "${PI_HOST}:${REMOTE_TMPFILES}"
+fi
+
 echo "==> Installing binary..."
 
 if [[ "$ON_REMOTE" == true ]]; then
@@ -216,6 +305,10 @@ INSTALL_PATH="${INSTALL_PATH}"
 SERVICE="${SERVICE}"
 REMOTE_TMP="${REMOTE_TMP}"
 REMOTE_CONFIG_TMP="${REMOTE_CONFIG_TMP}"
+REMOTE_SVC_TMP="${REMOTE_SVC_TMP}"
+REMOTE_TMPFILES="${REMOTE_TMPFILES}"
+_DEF_SVC_USER="${NOMON_SERVICE_USER:-root}"
+_DEF_SVC_GROUP="${NOMON_SERVICE_GROUP:-nomon}"
 
 if [[ -f "\${INSTALL_PATH}" ]]; then
     sudo cp "\${INSTALL_PATH}" "\${INSTALL_PATH}.bak"
@@ -228,6 +321,43 @@ sudo chmod 755 "\${tmp}"
 sudo mv -f "\${tmp}" "\${INSTALL_PATH}"
 rm -f "\${REMOTE_TMP}"
 echo "==> Installed to \${INSTALL_PATH}"
+
+# ── Install systemd service file ─────────────────────────────────────────────
+echo "==> Installing nomopractic.service..."
+if ! command -v envsubst >/dev/null 2>&1; then
+    echo "Error: envsubst not found. Install gettext-base: sudo apt-get install -y gettext-base" >&2
+    exit 3
+fi
+
+# Source on-device env for variable substitution; fall back to script defaults.
+if [[ -f /etc/nomopractic/nomopractic.env ]]; then
+    set -o allexport
+    # shellcheck disable=SC1091
+    source /etc/nomopractic/nomopractic.env
+    set +o allexport
+fi
+export NOMON_SERVICE_USER="\${NOMON_SERVICE_USER:-\${_DEF_SVC_USER}}"
+export NOMON_SERVICE_GROUP="\${NOMON_SERVICE_GROUP:-\${_DEF_SVC_GROUP}}"
+
+_expanded="\$(envsubst '\$NOMON_SERVICE_USER \$NOMON_SERVICE_GROUP' < "\${REMOTE_SVC_TMP}")"
+printf '%s\n' "\${_expanded}" | sudo tee /etc/systemd/system/nomopractic.service > /dev/null
+sudo chmod 644 /etc/systemd/system/nomopractic.service
+rm -f "${REMOTE_SVC_TMP}"
+echo "==> nomopractic.service installed ✓"
+
+# Install tmpfiles.d entry for /var/lib/nomon (if provided)
+if [[ -f "${REMOTE_TMPFILES}" ]]; then
+    echo "==> Installing tmpfiles.d/nomon.conf..."
+    sudo mkdir -p /etc/tmpfiles.d
+    sudo mv -f "${REMOTE_TMPFILES}" /etc/tmpfiles.d/nomon.conf
+    sudo chmod 644 /etc/tmpfiles.d/nomon.conf
+    sudo systemd-tmpfiles --create /etc/tmpfiles.d/nomon.conf || true
+fi
+
+# Ensure /var/lib/nomon is owned by the service user/group so nomopractic
+# can read the pairing secret file. Use the configured service user/group
+# (defaults on the remote host will be substituted at runtime).
+sudo chown -R "\${NOMON_SERVICE_USER:-root}:\${NOMON_SERVICE_GROUP:-nomon}" /var/lib/nomon || true
 
 # If a config was uploaded, atomically install it to /etc/nomopractic
 if [[ -n "\${REMOTE_CONFIG_TMP}" ]]; then
@@ -247,8 +377,13 @@ sudo systemctl daemon-reload
 sudo systemctl restart "\${SERVICE}"
 sudo systemctl enable  "\${SERVICE}"
 
+echo "==> Making the BLE controller discoverable and pairable for 5 minutes..."
+sudo /usr/bin/bluetoothctl discoverable-timeout 300 || true
+sudo /usr/bin/bluetoothctl pairable on || true
+sudo /usr/bin/bluetoothctl discoverable on || true
+
 echo "==> Waiting for service to become active..."
-for i in \$(seq 1 10); do
+for _ in \$(seq 1 10); do
     if systemctl is-active --quiet "\${SERVICE}"; then
         echo "==> \${SERVICE} is running (version ${DISPLAY_VERSION})"
         exit 0
@@ -278,13 +413,51 @@ else
         echo "==> Installed config to /etc/nomopractic/config.toml"
     fi
 
+    # ── Install systemd service file ─────────────────────────────────────────────
+    echo "==> Installing nomopractic.service..."
+    if ! command -v envsubst >/dev/null 2>&1; then
+        echo "Error: envsubst not found. Install gettext-base: sudo apt-get install -y gettext-base" >&2
+        exit 3
+    fi
+
+    # Source on-device env; fall back to script defaults.
+    if [[ -f /etc/nomopractic/nomopractic.env ]]; then
+        set -o allexport
+        # shellcheck disable=SC1091
+        source /etc/nomopractic/nomopractic.env
+        set +o allexport
+    fi
+    export NOMON_SERVICE_USER="${NOMON_SERVICE_USER:-root}"
+    export NOMON_SERVICE_GROUP="${NOMON_SERVICE_GROUP:-nomon}"
+
+    _expanded="$(envsubst '$NOMON_SERVICE_USER $NOMON_SERVICE_GROUP' < "${REPO_DIR}/systemd/nomopractic.service")"
+    printf '%s\n' "${_expanded}" | sudo tee /etc/systemd/system/nomopractic.service > /dev/null
+    sudo chmod 644 /etc/systemd/system/nomopractic.service
+    echo "==> nomopractic.service installed ✓"
+
+    # Install tmpfiles.d entry for /var/lib/nomon so the pairing secret
+    # directory exists with correct owner/permissions on boot.
+    echo "==> Installing tmpfiles.d/nomon.conf..."
+    sudo mkdir -p /etc/tmpfiles.d
+    sudo cp "${REPO_DIR}/systemd/tmpfiles.d/nomon.conf" /etc/tmpfiles.d/nomon.conf
+    sudo chmod 644 /etc/tmpfiles.d/nomon.conf
+    sudo systemd-tmpfiles --create /etc/tmpfiles.d/nomon.conf || true
+
+    # Ensure /var/lib/nomon is owned by the service user/group so the
+    # nomopractic process can read the pairing secret file.
+    sudo chown -R "${NOMON_SERVICE_USER:-root}:${NOMON_SERVICE_GROUP:-nomon}" /var/lib/nomon || true
+
     echo "==> Restarting ${SERVICE}.service..."
     sudo systemctl daemon-reload
     sudo systemctl restart "${SERVICE}"
     sudo systemctl enable  "${SERVICE}"
 
+    echo "==> Making BLE controller discoverable for 5 minutes..."
+    sudo /usr/bin/bluetoothctl discoverable-timeout 300 || true
+    sudo /usr/bin/bluetoothctl discoverable on || true
+
     echo "==> Waiting for service to become active..."
-    for i in $(seq 1 10); do
+    for _ in $(seq 1 10); do
         if systemctl is-active --quiet "${SERVICE}"; then
             echo "==> ${SERVICE} is running (version ${DISPLAY_VERSION})"
             exit 0

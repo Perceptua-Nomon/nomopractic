@@ -86,10 +86,9 @@ max_duration_s             = 300    # Auto-stop after this many seconds
 # ─── BLE GATT Server ────────────────────────────────────────────────────────
 # BLE support is compile-time optional (Cargo feature `ble`).  When enabled,
 # the daemon exposes a GATT server for mobile pairing and fallback control.
-# See ADR-001 (GATT architecture), ADR-002 (binary protocol), ADR-003 (security).
+# See ADR-001 (GATT architecture), ADR-004 (BLE simplification).
 
 [ble]
-enabled             = false                          # Disabled by default; enable on Pi with BlueZ
-device_name         = "nomon"                        # BLE advertising name (max 29 bytes)
-pairing_secret_path = "/var/lib/nomon/pairing_secret" # Shared secret file (root:nomon 0640)
-jwt_secret_env      = "NOMON_JWT_SECRET"             # Env var for JWT HS256 signing secret
+enabled             = true # Disabled by default; enable on Pi with BlueZ
+device_name         = "perceptua" # BLE advertising name (max 29 bytes)
+pairing_secret_path = "/var/lib/nomon/pairing_secret" # 6-digit numeric passkey file (000000–999999)

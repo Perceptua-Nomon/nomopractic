@@ -1,8 +1,13 @@
 # ADR-002: Binary Protocol for BLE GATT
 
+> ⚠️ **SUPERSEDED — Do not implement.**
+> This ADR describes a binary frame protocol (opcodes, fixed-point encoding) that was fully replaced by [ADR-004: BLE Simplification — Native OS Pairing + NDJSON Relay](004-ble-simplification.md).
+> The binary codec, all opcode tables, and fixed-point helpers no longer exist in either `nomopractic` or `nomotactic`.
+> Retain this document for historical reference only.
+
 ## Status
 
-Accepted
+Superseded by [ADR-004](004-ble-simplification.md)
 
 ## Date
 

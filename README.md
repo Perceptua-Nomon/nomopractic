@@ -19,8 +19,17 @@ hardware knowledge — it only sends/receives IPC messages.
 |---------|---------|
 | Battery voltage | ADC channel A4, scaled reading |
 | Servo control | 12 PWM channels, angle or pulse-width, TTL safety lease |
+| DC motor control | 4 channels, speed percentage, TTL safety lease |
+| Named vehicle methods | `drive`, `steer`, `pan_camera`, `tilt_camera` |
+| Grayscale sensors | 3 ADC channels, raw + normalized readings, calibration |
+| Ultrasonic sensor | Distance measurement in cm |
+| Audio | Speaker enable/disable, volume and mic gain via ALSA |
+| Calibration | Per-motor, per-servo, and grayscale calibration; persist to TOML |
+| Routines | Built-in obstacle-avoidance and line-following autonomous routines |
 | MCU reset | Assert/release BCM5 GPIO |
-| Named GPIO | D4, D5, MCURST, SW, LED |
+| Named GPIO | D4, D5, MCURST, SW, LED — read/write via IPC |
+| WiFi | Scan networks, connect, status |
+| BLE | GATT server (ADR-004): NDJSON relay over Command Write + Response Notify characteristics |
 | IPC | Unix socket + NDJSON at `/run/nomopractic/nomopractic.sock` |
 | Config | TOML file + `NOMON_HAT_*` env var overrides |
 
@@ -86,15 +95,50 @@ src/
 │   ├── mod.rs       Routine engine (start/stop/status)
 │   └── explore.rs   Autonomous explore routine
 ├── ble/             BLE GATT server (behind `ble` feature flag)
-│   ├── mod.rs       GATT server lifecycle, advertising
-│   ├── protocol.rs  Binary frame codec
-│   ├── services.rs  GATT service + characteristic registration
-│   ├── session.rs   Pairing, HKDF key derivation, AES-CCM
-│   ├── bridge.rs    BLE command → IPC handler dispatch
-│   └── wifi.rs      WiFi provisioning (nmcli)
+│   ├── mod.rs       GATT server lifecycle, BlueZ passkey agent, advertising
+│   ├── services.rs  Single GATT service + 2 characteristics (Command Write, Response Notify)
+│   └── bridge.rs    NDJSON relay: accumulate chunks → dispatch → chunk response
+├── wifi.rs          WiFi control: nmcli scan/connect/status (WifiControl trait)
 ├── reset.rs         MCU reset (BCM5)
 └── testing.rs       Shared test mocks (MockI2c, MockGpio, MockAlsaControl)
 ```
+
+## BLE Pairing Setup
+
+nomopractic uses OS-level Bluetooth passkey pairing (ADR-004) and an NDJSON
+relay over a single GATT service. The daemon reads a 6-digit numeric
+passkey from `pairing_secret_path` (default `/var/lib/nomon/pairing_secret`) at
+startup.
+
+Behavior added in this branch:
+- Deploy installs a `systemd-tmpfiles` entry to ensure `/var/lib/nomon` exists
+  with owner `root:nomon` and mode `0750`.
+- `nomopractic` will attempt to create and seed `/var/lib/nomon/pairing_secret`
+  with a random 6-digit passkey (mode `0640`) if the file is missing so the
+  daemon can run standalone for developer testing.
+
+Manual creation (optional):
+
+```bash
+sudo mkdir -p /var/lib/nomon
+echo "123456" | sudo tee /var/lib/nomon/pairing_secret > /dev/null
+sudo chmod 640 /var/lib/nomon/pairing_secret
+sudo chown root:nomon /var/lib/nomon/pairing_secret
+```
+
+Enable BLE in `config.toml`:
+
+```toml
+[ble]
+enabled = true
+device_name = "nomon"
+pairing_secret_path = "/var/lib/nomon/pairing_secret"
+```
+
+On mobile: scan for the device named as configured and use an LE-capable
+client (native OS pairing, nRF Connect, LightBlue) to initiate an LE GATT
+connection — when the BlueZ agent is invoked the passkey returned will match
+the file contents and the app can call `authenticate` to receive a device-scoped JWT.
 
 ## Documentation
 

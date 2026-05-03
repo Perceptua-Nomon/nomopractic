@@ -26,9 +26,10 @@ Linux stack. The question is which process hosts the BLE GATT server.
 The BLE GATT server is implemented in **nomopractic** (Rust) using the
 `bluer` crate (BlueZ D-Bus bindings for async Rust).
 
-BLE commands received via GATT characteristic writes are decoded from a
-compact binary protocol and dispatched to the existing `ipc/handler.rs`
-method handler — the same code path that serves Unix socket IPC requests.
+BLE commands received via GATT characteristic writes are relayed as NDJSON
+to the existing `ipc/handler.rs` method handler — the same code path that
+serves Unix socket IPC requests. (The earlier binary command protocol described
+in ADR-002 is superseded by ADR-004.)
 
 ## Alternatives Considered
 
@@ -70,16 +71,24 @@ method handler — the same code path that serves Unix socket IPC requests.
 - The Pi must have BlueZ installed and `bluetooth.service` enabled (already
   the default on Raspberry Pi OS).
 - nomopractic's `config.toml` gains a `[ble]` section for enabling/disabling
-  BLE, setting the device advertising name, and referencing the shared
-  pairing/JWT secrets.
+  BLE, setting the device advertising name, and referencing the
+  `pairing_secret_path` — a file containing the 6-digit numeric passkey read
+  by the BlueZ passkey agent.
 - The `bluer` GATT server runs as a Tokio task within the existing runtime;
   no new threads or processes.
 - BLE support is compile-time optional via a Cargo feature flag (`ble`) to
   keep the binary small for non-BLE deployments and to avoid `bluer`
   dependencies in CI on x86_64 where BlueZ is not available.
-- Unit tests for the BLE binary codec and bridge logic do not require BlueZ
+- Unit tests for the BLE NDJSON relay bridge logic do not require BlueZ
   and run on any platform. Integration tests for the full GATT stack require
   a BlueZ-capable environment.
+
+## Subsequent Decisions
+
+- **[ADR-004](004-ble-simplification.md)** — BLE Simplification: Native OS Pairing + NDJSON Relay.
+  Replaces the binary command protocol (ADR-002) and application-layer encryption (ADR-003).
+  This ADR (001) remains accepted — the decision to host the GATT server in nomopractic is preserved.
+  ADR-002 and ADR-003 are superseded.
 
 ## References
 

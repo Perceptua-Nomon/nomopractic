@@ -1,0 +1,46 @@
+name: BLE Integration Tests
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: 'Optional self-hosted runner label (default: self-hosted)'
+        required: false
+        default: 'self-hosted'
+
+concurrency:
+  group: ble-integration
+  cancel-in-progress: false
+
+jobs:
+  ble-integration:
+    name: BLE Integration (self-hosted)
+    runs-on: [self-hosted, linux]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure bluetooth service is available
+        run: |
+          sudo systemctl start bluetooth || true
+          sudo /usr/bin/bluetoothctl power on || true
+
+      - name: Setup Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Install apt packages (optional)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libudev-dev || true
+
+      - name: Run BLE integration tests
+        env:
+          NOMON_RUN_BLE_INTEGRATION: "1"
+        run: |
+          cargo test --test ble_pairing_integration --features ble -- --nocapture
