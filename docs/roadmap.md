@@ -365,7 +365,7 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 13 | BLE GATT Server | ⊘ Superseded by Phase 15 | 278 |
 | 13.1 | BLE Simplification | ⊘ Superseded by Phase 15 | — |
 | 14 | Service Env-File & Deploy Hardening | ✅ Complete | — |
-| 15 | BLE → Wi-Fi Soft AP Migration | 🔲 Planned | — |
+| 15 | BLE → Wi-Fi Soft AP Migration | ✅ Complete | — |
 
 ---
 
@@ -1212,7 +1212,7 @@ fi
 
 ---
 
-## Phase 15 — BLE → Wi-Fi Soft AP Migration 🔲
+## Phase 15 — BLE → Wi-Fi Soft AP Migration ✅
 
 **Goal**: Remove all Bluetooth/BLE code from nomopractic and replace the BLE
 pairing channel with a Wi-Fi Soft AP fallback. When the device cannot reach a
@@ -1229,18 +1229,18 @@ antenna contention.
 
 ### 15.1 — Delete BLE Source Module
 
-- [ ] Delete `src/ble/mod.rs`, `src/ble/bridge.rs`, `src/ble/services.rs`
+- [x] Delete `src/ble/mod.rs`, `src/ble/bridge.rs`, `src/ble/services.rs`
       (entire `src/ble/` directory)
-- [ ] Delete `src/wifi.rs`
-- [ ] `src/lib.rs`: remove `pub mod ble;` and `pub mod wifi;` declarations
-- [ ] `Cargo.toml`: remove `bluer`, `tokio-stream` optional dependencies and
+- [x] Delete `src/wifi.rs`
+- [x] `src/lib.rs`: remove `pub mod ble;` and `pub mod wifi;` declarations
+- [x] `Cargo.toml`: remove `bluer`, `tokio-stream` optional dependencies and
       `[features] ble` section; remove `jsonwebtoken` and `chrono` crates
       (used exclusively by the deleted `authenticate` IPC method)
 - Verify: `cargo build` succeeds with no `ble` or `wifi` module references
 
 ### 15.2 — Strip BLE from Config
 
-- [ ] `src/config.rs`: delete `BleConfig` struct, the `ble: BleConfig` field
+- [x] `src/config.rs`: delete `BleConfig` struct, the `ble: BleConfig` field
       on `Config`, the `ble: BleConfig::default()` in `Config::default()`, all
       `NOMON_BLE_*` environment-variable override blocks, and the
       `ble.device_name` length validation in `Config::validate()`
@@ -1248,32 +1248,32 @@ antenna contention.
 
 ### 15.3 — Strip BLE from main.rs
 
-- [ ] `src/main.rs`: remove the entire `#[cfg(feature = "ble")]` block that
+- [x] `src/main.rs`: remove the entire `#[cfg(feature = "ble")]` block that
       spawns the BLE GATT server task
 - Verify: `cargo build` produces a warning-free binary; diff shows only the
       `cfg(feature = "ble")` block removed
 
 ### 15.4 — Remove Dead IPC Methods
 
-- [ ] `src/ipc/handler.rs`: remove dispatch arms for `wifi_scan`,
+- [x] `src/ipc/handler.rs`: remove dispatch arms for `wifi_scan`,
       `wifi_connect`, `wifi_status`, and `authenticate`
-- [ ] `src/ipc/handler.rs`: delete `handle_wifi_scan`, `handle_wifi_connect`,
+- [x] `src/ipc/handler.rs`: delete `handle_wifi_scan`, `handle_wifi_connect`,
       `handle_wifi_status`, and `handle_authenticate` method bodies
-- [ ] `src/ipc/handler.rs`: remove `use crate::wifi::{NmcliWifi, WifiControl};`
+- [x] `src/ipc/handler.rs`: remove `use crate::wifi::{NmcliWifi, WifiControl};`
       import
-- [ ] Delete any unit tests in `handler.rs` that cover these four methods
+- [x] Delete any unit tests in `handler.rs` that cover these four methods
 - Verify: `cargo test` still passes; `cargo clippy -- -D warnings` clean
 
 ### 15.5 — Delete BLE Documentation
 
-- [ ] Delete `docs/pairing.md` (BLE developer guide)
-- [ ] Delete `docs/adr/` — **no deletion**; ADR-001 through ADR-004 are updated
+- [x] Delete `docs/pairing.md` (BLE developer guide)
+- [x] Delete `docs/adr/` — **no deletion**; ADR-001 through ADR-004 are updated
       with `Superseded by ADR-005` in their Status fields (already done)
 - Verify: `ls docs/pairing.md` returns non-zero
 
 ### 15.6 — Wi-Fi Soft AP Script
 
-- [ ] Create `scripts/ap-mode.sh` — shell script managing NM hotspot lifecycle:
+- [x] Create `scripts/ap-mode.sh` — shell script managing NM hotspot lifecycle:
   - Subcommands: `up` (create + activate `nomon-ap` NM connection),
     `down` (deactivate + delete `nomon-ap`), `status` (print current state)
   - On `up`: reads `/var/lib/nomon/pairing_secret` for the WPA2 PSK;
@@ -1283,12 +1283,12 @@ antenna contention.
     NAT for AP clients)
   - Idempotent: `up` is a no-op if `nomon-ap` is already active; `down` is
     a no-op if not present
-- [ ] Create `systemd/nomon-softap.service` — `Type=oneshot` unit that calls
+- [x] Create `systemd/nomon-softap.service` — `Type=oneshot` unit that calls
       `scripts/ap-mode.sh up`; `RemainAfterExit=yes`; `After=NetworkManager.service`
-- [ ] Create `systemd/nomon-softap-watchdog.service` + `.timer` — polls
+- [x] Create `systemd/nomon-softap-watchdog.service` + `.timer` — polls
       `nmcli general connectivity` every 30 s; calls `ap-mode.sh up` when
       connectivity is `none` or `limited`, `ap-mode.sh down` when `full`
-- [ ] `scripts/deploy.sh`: install `nomon-softap.service`, `.timer`, and
+- [x] `scripts/deploy.sh`: install `nomon-softap.service`, `.timer`, and
       `nomon-softap-watchdog.service` to `/etc/systemd/system/` on deploy;
       enable and start timer
 - Verify: `systemctl is-active nomon-softap-watchdog.timer` → `active`;
@@ -1296,7 +1296,7 @@ antenna contention.
 
 ### 15.7 — Update Architecture Docs
 
-- [ ] `docs/architecture.md`: replace BLE section with Wi-Fi Soft AP section;
+- [x] `docs/architecture.md`: replace BLE section with Wi-Fi Soft AP section;
       update module dependency graph (remove `ble`, `wifi` module nodes);
       update Methods Summary table (remove `wifi_scan`, `wifi_connect`,
       `wifi_status`, `authenticate`)
@@ -1304,13 +1304,13 @@ antenna contention.
 
 #### Phase 15 Exit Criteria
 
-- [ ] `cargo build` — succeeds with zero `ble` or `wifi` module references
-- [ ] `cargo test` — all tests pass; no BLE-conditional tests remain
-- [ ] `cargo clippy -- -D warnings` — clean
-- [ ] `cargo fmt --check` — clean
-- [ ] `grep -r 'bluer\|BLE_CONN_ID\|BleConfig\|ble::' src/` — no output
-- [ ] `grep 'wifi_scan\|wifi_connect\|wifi_status\|authenticate' src/ipc/handler.rs` — no output
-- [ ] `scripts/ap-mode.sh up` + `scripts/ap-mode.sh down` succeed on Pi
-- [ ] When Pi has no known network: `nomon-<last4>` AP appears within 30 s,
+- [x] `cargo build` — succeeds with zero `ble` or `wifi` module references
+- [x] `cargo test` — all tests pass; no BLE-conditional tests remain
+- [x] `cargo clippy -- -D warnings` — clean
+- [x] `cargo fmt --check` — clean
+- [x] `grep -r 'bluer\|BLE_CONN_ID\|BleConfig\|ble::' src/` — no output
+- [x] `grep 'wifi_scan\|wifi_connect\|wifi_status\|authenticate' src/ipc/handler.rs` — no output
+- [x] `scripts/ap-mode.sh up` + `scripts/ap-mode.sh down` succeed on Pi
+- [x] When Pi has no known network: `nomon-<last4>` AP appears within 30 s,
       `https://192.168.4.1:8443/api/device/auth/status` is reachable from a
       connected client
