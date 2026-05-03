@@ -208,3 +208,10 @@ subcommands for manual use during development and deployment.
 - **Requires NetworkManager.** The AP mode script depends on `nmcli` ≥ 1.x
   being present and managing `wlan0`. Raspbian Bookworm (default since 2023)
   satisfies this; older dhcpcd-only setups do not.
+- **WPA2 credential in process table.** `POST /api/device/network/configure`
+  invokes `nmcli` as a subprocess with the Wi-Fi password in the argument list
+  (`shell=False`), making it briefly visible in `/proc/<pid>/cmdline` to
+  processes running as root or the `nomon` user. This is an inherent `nmcli`
+  CLI limitation. Accepted risk on a single-user embedded device (physical
+  access ≈ full compromise). Mitigation path if hardening is required:
+  `nmcli --ask` with stdin, or NetworkManager D-Bus via `dbus-python`.
