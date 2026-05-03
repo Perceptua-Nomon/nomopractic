@@ -1,4 +1,3 @@
-pub mod ble;
 pub mod calibration;
 pub mod config;
 pub mod hat;
@@ -7,4 +6,3 @@ pub mod reset;
 pub mod routine;
 #[doc(hidden)]
 pub mod testing;
-pub mod wifi;

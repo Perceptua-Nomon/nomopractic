@@ -285,6 +285,9 @@ if [[ "$ON_REMOTE" == true ]]; then
     _rscp "${REPO_DIR}/systemd/nomopractic.service" "${PI_HOST}:${REMOTE_SVC_TMP}"
     # copy tmpfiles entry so remote deploy installs it
     _rscp "${REPO_DIR}/systemd/tmpfiles.d/nomon.conf" "${PI_HOST}:${REMOTE_TMPFILES}"
+    _rscp "${REPO_DIR}/systemd/nomon-softap.service"           "${PI_HOST}:/tmp/nomon-softap.service.$$"
+    _rscp "${REPO_DIR}/systemd/nomon-softap-watchdog.service"  "${PI_HOST}:/tmp/nomon-softap-watchdog.service.$$"
+    _rscp "${REPO_DIR}/systemd/nomon-softap-watchdog.timer"    "${PI_HOST}:/tmp/nomon-softap-watchdog.timer.$$"
 fi
 
 echo "==> Installing binary..."
@@ -345,6 +348,16 @@ sudo chmod 644 /etc/systemd/system/nomopractic.service
 rm -f "${REMOTE_SVC_TMP}"
 echo "==> nomopractic.service installed ✓"
 
+# ── Install Soft AP systemd units ────────────────────────────────────────────
+echo "==> Installing Soft AP systemd units..."
+for _unit in nomon-softap.service nomon-softap-watchdog.service nomon-softap-watchdog.timer; do
+    sudo cp "/tmp/${_unit}.$$" "/etc/systemd/system/${_unit}"
+    sudo chmod 644 "/etc/systemd/system/${_unit}"
+    rm -f "/tmp/${_unit}.$$"
+    echo "==> ${_unit} installed ✓"
+done
+sudo systemctl enable nomon-softap-watchdog.timer
+
 # Install tmpfiles.d entry for /var/lib/nomon (if provided)
 if [[ -f "${REMOTE_TMPFILES}" ]]; then
     echo "==> Installing tmpfiles.d/nomon.conf..."
@@ -376,11 +389,6 @@ echo "==> Restarting \${SERVICE}.service..."
 sudo systemctl daemon-reload
 sudo systemctl restart "\${SERVICE}"
 sudo systemctl enable  "\${SERVICE}"
-
-echo "==> Making the BLE controller discoverable and pairable for 5 minutes..."
-sudo /usr/bin/bluetoothctl discoverable-timeout 300 || true
-sudo /usr/bin/bluetoothctl pairable on || true
-sudo /usr/bin/bluetoothctl discoverable on || true
 
 echo "==> Waiting for service to become active..."
 for _ in \$(seq 1 10); do
@@ -435,6 +443,15 @@ else
     sudo chmod 644 /etc/systemd/system/nomopractic.service
     echo "==> nomopractic.service installed ✓"
 
+    # ── Install Soft AP systemd units ────────────────────────────────────────────
+    echo "==> Installing Soft AP systemd units..."
+    for _unit in nomon-softap.service nomon-softap-watchdog.service nomon-softap-watchdog.timer; do
+        sudo cp "${REPO_DIR}/systemd/${_unit}" "/etc/systemd/system/${_unit}"
+        sudo chmod 644 "/etc/systemd/system/${_unit}"
+        echo "==> ${_unit} installed ✓"
+    done
+    sudo systemctl enable nomon-softap-watchdog.timer
+
     # Install tmpfiles.d entry for /var/lib/nomon so the pairing secret
     # directory exists with correct owner/permissions on boot.
     echo "==> Installing tmpfiles.d/nomon.conf..."
@@ -451,10 +468,6 @@ else
     sudo systemctl daemon-reload
     sudo systemctl restart "${SERVICE}"
     sudo systemctl enable  "${SERVICE}"
-
-    echo "==> Making BLE controller discoverable for 5 minutes..."
-    sudo /usr/bin/bluetoothctl discoverable-timeout 300 || true
-    sudo /usr/bin/bluetoothctl discoverable on || true
 
     echo "==> Waiting for service to become active..."
     for _ in $(seq 1 10); do

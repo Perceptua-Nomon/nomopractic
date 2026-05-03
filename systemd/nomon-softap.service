@@ -1,0 +1,17 @@
+[Unit]
+Description=nomon Wi-Fi Soft AP
+Documentation=https://github.com/Perceptua-Nomon/nomopractic
+After=NetworkManager.service
+Wants=NetworkManager.service
+PartOf=nomopractic.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ap-mode.sh up
+ExecStop=/usr/local/bin/ap-mode.sh down
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=nomopractic.service

@@ -28,8 +28,7 @@ hardware knowledge — it only sends/receives IPC messages.
 | Routines | Built-in obstacle-avoidance and line-following autonomous routines |
 | MCU reset | Assert/release BCM5 GPIO |
 | Named GPIO | D4, D5, MCURST, SW, LED — read/write via IPC |
-| WiFi | Scan networks, connect, status |
-| BLE | GATT server (ADR-004): NDJSON relay over Command Write + Response Notify characteristics |
+| Wi-Fi Soft AP | WPA2 hotspot (`nomon-<last4-of-MAC>`) for proximity pairing (ADR-005) |
 | IPC | Unix socket + NDJSON at `/run/nomopractic/nomopractic.sock` |
 | Config | TOML file + `NOMON_HAT_*` env var overrides |
 
@@ -94,51 +93,37 @@ src/
 ├── routine/
 │   ├── mod.rs       Routine engine (start/stop/status)
 │   └── explore.rs   Autonomous explore routine
-├── ble/             BLE GATT server (behind `ble` feature flag)
-│   ├── mod.rs       GATT server lifecycle, BlueZ passkey agent, advertising
-│   ├── services.rs  Single GATT service + 2 characteristics (Command Write, Response Notify)
-│   └── bridge.rs    NDJSON relay: accumulate chunks → dispatch → chunk response
-├── wifi.rs          WiFi control: nmcli scan/connect/status (WifiControl trait)
 ├── reset.rs         MCU reset (BCM5)
 └── testing.rs       Shared test mocks (MockI2c, MockGpio, MockAlsaControl)
 ```
 
-## BLE Pairing Setup
+## Wi-Fi Soft AP Pairing
 
-nomopractic uses OS-level Bluetooth passkey pairing (ADR-004) and an NDJSON
-relay over a single GATT service. The daemon reads a 6-digit numeric
-passkey from `pairing_secret_path` (default `/var/lib/nomon/pairing_secret`) at
-startup.
+When the device cannot reach a known Wi-Fi network, the Soft AP watchdog
+(`systemd/nomon-softap-watchdog.timer`) calls `scripts/ap-mode.sh up` to
+broadcast a WPA2 hotspot named `nomon-<last4-of-MAC>`. The passphrase is read
+from `/var/lib/nomon/pairing_secret` — the same shared secret that nomothetic
+generates on first boot.
 
-Behavior added in this branch:
-- Deploy installs a `systemd-tmpfiles` entry to ensure `/var/lib/nomon` exists
-  with owner `root:nomon` and mode `0750`.
-- `nomopractic` will attempt to create and seed `/var/lib/nomon/pairing_secret`
-  with a random 6-digit passkey (mode `0640`) if the file is missing so the
-  daemon can run standalone for developer testing.
+The hotspot is accessible from any browser or the nomotactic app:
 
-Manual creation (optional):
-
-```bash
-sudo mkdir -p /var/lib/nomon
-echo "123456" | sudo tee /var/lib/nomon/pairing_secret > /dev/null
-sudo chmod 640 /var/lib/nomon/pairing_secret
-sudo chown root:nomon /var/lib/nomon/pairing_secret
+```
+SSID:       nomon-<last4-of-MAC>
+Passphrase: contents of /var/lib/nomon/pairing_secret
+Device IP:  192.168.4.1
+API:        https://192.168.4.1:8443
 ```
 
-Enable BLE in `config.toml`:
+Once connected, open `https://192.168.4.1:8443` (accept the self-signed
+certificate) and follow the on-screen pairing prompt — enter the same
+passphrase shown in the nomothetic startup log to obtain a device-scoped JWT.
 
-```toml
-[ble]
-enabled = true
-device_name = "nomon"
-pairing_secret_path = "/var/lib/nomon/pairing_secret"
-```
+The watchdog automatically deactivates the AP once the Pi acquires a full
+internet connection, restoring normal operation.
 
-On mobile: scan for the device named as configured and use an LE-capable
-client (native OS pairing, nRF Connect, LightBlue) to initiate an LE GATT
-connection — when the BlueZ agent is invoked the passkey returned will match
-the file contents and the app can call `authenticate` to receive a device-scoped JWT.
+See [`docs/adr/005-wifi-soft-ap.md`](docs/adr/005-wifi-soft-ap.md) for design
+rationale and [`docs/architecture.md`](docs/architecture.md) for the Soft AP
+architecture section.
 
 ## Documentation
 
