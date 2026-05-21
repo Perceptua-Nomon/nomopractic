@@ -5,15 +5,58 @@ After=NetworkManager.service
 
 [Service]
 Type=oneshot
-# If the device has full internet connectivity, the AP is not needed.
-# If connectivity is not full and the AP is not up, activate it.
+TimeoutStartSec=90
+# Manage the Soft AP based on current connectivity:
+#
+#   full connectivity          → AP not needed; bring it down.
+#   active home Wi-Fi          → keep AP down, even if internet is limited.
+#   no connectivity, AP down   → bring the AP up so the user can pair.
+#   no connectivity, AP up     → wlan0 cannot be in AP mode and station mode
+#                                simultaneously. If stored home-network profiles
+#                                exist, tear the AP down and give NetworkManager
+#                                15 s to auto-reconnect. Restore the AP if the
+#                                device is still offline after that window.
 ExecStart=/bin/bash -c '\
+    RETRY_STATE=/run/nomon-softap-retry; \
+    RETRY_BACKOFF=300; \
     CONNECTIVITY=$(nmcli -t general connectivity 2>/dev/null || echo none); \
-    if [ "$CONNECTIVITY" = "full" ]; then \
+    ACTIVE_WIFI=$(nmcli -t -f DEVICE,CONNECTION device 2>/dev/null \
+        | grep "^wlan0:[^:]" | grep -v "^wlan0:nomon-softap"); \
+    if [ "$$CONNECTIVITY" = "full" ]; then \
+        rm -f "$$RETRY_STATE"; \
+        /usr/local/bin/ap-mode.sh down; \
+    elif [ -n "$$ACTIVE_WIFI" ]; then \
+        rm -f "$$RETRY_STATE"; \
         /usr/local/bin/ap-mode.sh down; \
     else \
         AP_STATUS=$(/usr/local/bin/ap-mode.sh status 2>/dev/null || echo down); \
-        if [ "$AP_STATUS" != "up" ]; then \
+        if [ "$$AP_STATUS" = "up" ]; then \
+            KNOWN_HOME=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null \
+                | grep ":802-11-wireless$" \
+                | grep -v "^nomon-softap:" \
+                | cut -d: -f1 | head -n1); \
+            if [ -n "$$KNOWN_HOME" ]; then \
+                if [ -f "$$RETRY_STATE" ]; then \
+                    LAST_RETRY=$(cat "$$RETRY_STATE" 2>/dev/null || echo 0); \
+                    LAST_RETRY=$${LAST_RETRY:-0}; \
+                    NOW=$(date +%s); \
+                    ELAPSED=$$((NOW - LAST_RETRY)); \
+                    if [ "$$ELAPSED" -lt "$$RETRY_BACKOFF" ]; then \
+                        echo "backoff: last home-reconnect attempt $${ELAPSED}s ago, skipping"; \
+                        exit 0; \
+                    fi; \
+                fi; \
+                /usr/local/bin/ap-mode.sh down; \
+                date +%s > "$$RETRY_STATE"; \
+                sleep 20; \
+                NEW_CON=$(nmcli -t general connectivity 2>/dev/null || echo none); \
+                if [ "$$NEW_CON" != "full" ]; then \
+                    /usr/local/bin/ap-mode.sh up; \
+                else \
+                    rm -f "$$RETRY_STATE"; \
+                fi; \
+            fi; \
+        else \
             /usr/local/bin/ap-mode.sh up; \
         fi; \
     fi'

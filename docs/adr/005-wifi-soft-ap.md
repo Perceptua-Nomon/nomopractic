@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted
+Accepted — Amended (2026-05-12)
+
+> **Amendment:** Phase 22 (nomothetic ADR-016) initially changed the AP service
+> to HTTPS+TOFU on `192.168.4.1:8443`, then reverted on 2026-05-11 to plain HTTP
+> on `192.168.4.1:8080` (interface-bound to the AP gateway only). References to
+> `:8443` and `https://` within the Decision section below reflect the original
+> design intent; the current implementation uses `http://192.168.4.1:8080`.
+> See nomothetic `docs/adr/016-ap-mode-https.md` for the full rationale.
 
 ## Date
 
@@ -89,7 +96,7 @@ starts a WPA2 protected hotspot with:
 | Password | Contents of `/var/lib/nomon/pairing_secret` (the same 6-digit secret already displayed at nomothetic startup) |
 | Pi IP on AP | `192.168.4.1` |
 | mDNS hostname | `nomon.local` (Avahi on the same interface) |
-| Service | nomothetic HTTPS on `192.168.4.1:8443` |
+| Service | nomothetic HTTP on `192.168.4.1:8080` (plain HTTP, interface-bound; see Status amendment) |
 
 The AP is managed by NetworkManager's built-in hotspot mode, triggered by a
 systemd service (`nomon-softap.service`) that:
@@ -120,8 +127,8 @@ subcommands for manual use during development and deployment.
    - The user connects their phone or laptop to the `nomon-XXXX` Wi-Fi network.
    - The password is the 6-digit secret printed to the nomothetic startup log
      (same secret already used for HTTP pairing in Phase 17).
-3. User opens `https://192.168.4.1:8443` (or `https://nomon.local:8443`) in any
-   browser, **or** opens the nomotactic app which already targets `DEVICE_API_URL`.
+3. User opens the nomotactic app (or `http://192.168.4.1:8080` directly), which
+   already targets `SOFT_AP_URL` (`http://192.168.4.1:8080`).
 4. The existing `HttpPairingForm` component submits the secret to
    `POST /api/device/auth/pair` — no new screen, no new endpoint.
 5. On success, the app receives device JWT tokens and proceeds to the device
@@ -163,7 +170,7 @@ subcommands for manual use during development and deployment.
   `/var/lib/nomon/pairing_secret`. The Soft AP uses the same file as its WPA2
   password, so the shared-secret lifecycle is unchanged.
 - `POST /api/device/auth/pair` REST endpoint — identical; Soft AP users reach
-  it over HTTPS on `192.168.4.1:8443`.
+  it over plain HTTP on `192.168.4.1:8080`.
 - `HttpPairingForm` component — already exists; now promoted to the primary
   (and only) pairing UI in `app/(app)/index.tsx`.
 - nomographic — no schema changes. Device registration writes the same VIN and
@@ -204,7 +211,8 @@ subcommands for manual use during development and deployment.
   numeric secret shown at startup. This is intentional (single secret, dual
   use) but means any device on the AP can attempt HTTPS requests. The
   `POST /api/device/auth/pair` rate limit (Phase 17) prevents brute-force
-  without knowledge of the secret.
+  without knowledge of the secret. The service is bound to `192.168.4.1` only
+  (not `0.0.0.0`), so no other interface can reach it.
 - **Requires NetworkManager.** The AP mode script depends on `nmcli` ≥ 1.x
   being present and managing `wlan0`. Raspbian Bookworm (default since 2023)
   satisfies this; older dhcpcd-only setups do not.

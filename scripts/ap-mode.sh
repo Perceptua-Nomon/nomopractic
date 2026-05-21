@@ -43,9 +43,13 @@ _get_passphrase() {
     fi
     local secret
     secret=$(tr -d '[:space:]' < "${PAIRING_SECRET_PATH}")
-    # nomon uses a 6-digit PIN on a private AP; reject only empty/trivially short values.
-    if [[ ${#secret} -lt 6 ]]; then
-        echo "ERROR: pairing secret must be at least 6 characters" >&2
+    # WPA2 requires 8-63 characters; enforce the standard minimum.
+    if [[ ${#secret} -lt 8 ]]; then
+        echo "ERROR: pairing secret must be at least 8 characters (WPA2 requirement)" >&2
+        exit 1
+    fi
+    if [[ ${#secret} -gt 63 ]]; then
+        echo "ERROR: pairing secret must be at most 63 characters (WPA2 requirement)" >&2
         exit 1
     fi
     echo "${secret}"
@@ -66,7 +70,17 @@ _connection_active() {
 cmd_up() {
     if _connection_active; then
         echo "already up"
+        # Ensure the AP service is running even if the AP was already active.
+        sudo systemctl start nomothetic-ap.service 2>/dev/null || true
         exit 0
+    fi
+
+    # Disconnect any active station-mode connection on wlan0 before activating
+    # the AP. Without this, NetworkManager rejects the AP activation with
+    # "base network connection was interrupted".
+    if nmcli -t -f DEVICE,STATE device 2>/dev/null | grep -q "^${IFACE}:connected"; then
+        nmcli device disconnect "${IFACE}" 2>/dev/null || true
+        sleep 2
     fi
 
     local ssid passphrase
@@ -95,10 +109,20 @@ cmd_up() {
         nmcli connection up "${CON_NAME}"
     fi
 
+    # Start the AP service now that the AP interface is active.
+    # nomothetic-ap.service runs the device API over plain HTTP on
+    # 192.168.4.1:8080.  No [Install] section — only live while the
+    # Soft AP is active (ADR-016).
+    sudo systemctl start nomothetic-ap.service 2>/dev/null || true
+
     echo "up: SSID=${ssid}"
 }
 
 cmd_down() {
+    # Stop the AP service before AP teardown so that port 8080 on
+    # 192.168.4.1 is no longer reachable.
+    sudo systemctl stop nomothetic-ap.service 2>/dev/null || true
+
     if _connection_active; then
         nmcli connection down "${CON_NAME}"
         echo "down"

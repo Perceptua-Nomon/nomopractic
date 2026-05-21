@@ -14,4 +14,5 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=nomopractic.service
+# Managed solely by nomon-softap-watchdog.timer — not auto-started by nomopractic.service.
+# (No WantedBy here prevents nmcli AP activation on every nomopractic restart.)

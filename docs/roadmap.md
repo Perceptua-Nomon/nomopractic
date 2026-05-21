@@ -1312,7 +1312,7 @@ antenna contention.
 - [x] `grep 'wifi_scan\|wifi_connect\|wifi_status\|authenticate' src/ipc/handler.rs` — no output
 - [x] `scripts/ap-mode.sh up` + `scripts/ap-mode.sh down` succeed on Pi
 - [x] When Pi has no known network: `nomon-<last4>` AP appears within 30 s,
-      `https://192.168.4.1:8443/api/device/auth/status` is reachable from a
+      `http://192.168.4.1:8080/api/device/auth/status` is reachable from a
       connected client
 
 ### Phase 15.8 — Wi-Fi Credential Provisioning (cross-repo)
