@@ -111,12 +111,12 @@ The hotspot is accessible from any browser or the nomotactic app:
 SSID:       nomon-<last4-of-MAC>
 Passphrase: contents of /var/lib/nomon/pairing_secret
 Device IP:  192.168.4.1
-API:        https://192.168.4.1:8443
+API:        http://192.168.4.1:8080
 ```
 
-Once connected, open `https://192.168.4.1:8443` (accept the self-signed
-certificate) and follow the on-screen pairing prompt — enter the same
-passphrase shown in the nomothetic startup log to obtain a device-scoped JWT.
+Once connected, open `http://192.168.4.1:8080` and follow the on-screen
+pairing prompt — enter the same passphrase shown in the nomothetic startup
+log to obtain a device-scoped JWT.
 
 The watchdog automatically deactivates the AP once the Pi acquires a full
 internet connection, restoring normal operation.

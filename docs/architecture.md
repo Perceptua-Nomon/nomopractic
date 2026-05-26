@@ -189,12 +189,12 @@ See `nomothetic/docs/hat_ipc_schema.md` for the full specification.
 ## Wi-Fi Soft AP
 
 When the device is not connected to a known Wi-Fi network, `scripts/ap-mode.sh`
-activates a WPA2 hotspot (`nomon-<last4-of-MAC>`) allowing any browser to reach
-nomothetic at `192.168.4.1:8443`. The passphrase is read from
-`/var/lib/nomon/pairing_secret` (the same file nomothetic generates for HTTP
-pairing). See `systemd/nomon-softap.service` and
-`systemd/nomon-softap-watchdog.timer` for the service units. Refer to
-nomopractic ADR-005 for the full design rationale.
+activates a WPA2 hotspot (`nomon-<last4-of-MAC>`) allowing the nomotactic app
+to reach nomothetic at `http://192.168.4.1:8080` (plain HTTP, interface-bound
+to the AP gateway). The passphrase is read from `/var/lib/nomon/pairing_secret`
+(the same file nomothetic generates for pairing). See `systemd/nomon-softap.service`
+and `systemd/nomon-softap-watchdog.timer` for the service units. Refer to
+nomopractic ADR-005 (and nomothetic ADR-016 amendment) for the full design rationale.
 
 ### End-to-End Provisioning Sequence
 
@@ -202,7 +202,7 @@ nomopractic ADR-005 for the full design rationale.
    → hotspot `nomon-<last4>` broadcasts at `192.168.4.1`
 2. **User connects** phone or laptop to `nomon-<last4>` using the 6-digit
    pairing secret as the Wi-Fi password
-3. **User opens browser / app** → reaches nomothetic at `https://192.168.4.1:8443`
+3. **User opens nomotactic app** → reaches nomothetic at `http://192.168.4.1:8080`
 4. **Pairing** → user submits pairing secret to `POST /api/device/auth/pair`
    → nomothetic issues a device JWT
 5. **Wi-Fi provisioning** → app reveals `WifiProvisionForm`; user enters home

@@ -1,20 +1,25 @@
 [Unit]
 Description=nomon HAT hardware daemon
 After=network.target
+# Wait for the HAT I2C bus to be registered by udev before starting.
+# Prevents a race on systems where i2c_bcm2835 initialises late at boot.
+After=dev-i2c\x2d1.device
+# No restart cap — lets the service keep retrying until I2C becomes available
+# (e.g. after enabling the interface on a fresh reimage and rebooting).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 EnvironmentFile=-/etc/nomopractic/nomopractic.env
 User=${NOMON_SERVICE_USER}
 Group=${NOMON_SERVICE_GROUP}
-# Let systemd create a runtime directory owned by the service user so the
-# daemon can bind the Unix socket without permission errors.
+# systemd creates /run/nomopractic owned by the service user before ExecStart
+# so the daemon can bind the Unix socket without permission errors.
 RuntimeDirectory=nomopractic
 RuntimeDirectoryMode=0750
-ExecStartPre=/bin/mkdir -p /run/nomopractic
 ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
 Restart=on-failure
-RestartSec=2s
+RestartSec=5s
 Environment=RUST_LOG=info
 
 [Install]

@@ -1,0 +1,18 @@
+// Allow root processes running as non-interactive systemd services (e.g.
+// nomon-softap.service, nomon-softap-watchdog.service) to manage
+// NetworkManager connections via nmcli without an active logind session.
+//
+// Polkit ordinarily requires an "active" local session even for root when
+// issuing NM actions such as connection-up, connection-add, and wifi-share.
+// These services have no TTY or logind session, so we grant the relevant
+// actions to root explicitly.
+//
+// Users in the 'netdev' group are also granted access so that the nomothetic
+// API service user (non-root) can invoke ap-mode.sh for POST /api/device/wifi/ap.
+// The deploy script adds the service user to 'netdev' automatically.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+            (subject.user === "root" || subject.isInGroup("netdev"))) {
+        return polkit.Result.YES;
+    }
+});
