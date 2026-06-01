@@ -367,6 +367,8 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 14 | Service Env-File & Deploy Hardening | ✅ Complete | — |
 | 15 | BLE → Wi-Fi Soft AP Migration | ✅ Complete | — |
 
+**Test total (current): 239 passing** (201 lib + 38 integration; BLE tests from Phase 13 removed in Phase 15)
+
 ---
 
 Developer pairing notes:
