@@ -170,7 +170,7 @@ hardware interaction.
 - [x] Battery voltage sanity check (voltage in expected range)
 - [x] Servo sweep test (0° → 180° → 0°)
 - [x] MCU reset test
-- [x] BLE pairing flow revisions completed in Phase 13
+- [x] Wi-Fi Soft AP pairing complete (Phase 15; BLE pairing removed — see ADR-005)
 
 **Results (v0.1.0, 2026-03-10, Pi Zero 2W / PicarX):**
 
@@ -366,6 +366,8 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 13.1 | BLE Simplification | ⊘ Superseded by Phase 15 | — |
 | 14 | Service Env-File & Deploy Hardening | ✅ Complete | — |
 | 15 | BLE → Wi-Fi Soft AP Migration | ✅ Complete | — |
+
+**Test total (current): 239 passing** (201 lib + 38 integration; BLE tests from Phase 13 removed in Phase 15)
 
 ---
 
@@ -660,7 +662,7 @@ proportional-derivative (PD) steering controller.
 
 ---
 
-### Phase 13 — BLE GATT Server (P1)
+### Phase 13 — BLE GATT Server ⊘ Superseded by Phase 15
 
 **Goal**: Expose a BLE GATT server from the nomopractic daemon so mobile
 clients can discover, pair with, and send basic commands to the robot without
@@ -815,7 +817,7 @@ Practical indoor range: 10–30 m. BLE MTU: 20–244 bytes (negotiated).
 
 ---
 
-### Phase 13.1 — BLE Simplification: Native OS Pairing + JSON Relay (P1)
+### Phase 13.1 — BLE Simplification: Native OS Pairing + JSON Relay ⊘ Superseded by Phase 15
 
 **Goal**: Replace the custom BLE binary protocol, AES-128-CCM encryption, and
 pairing ceremony with OS-level Bluetooth passkey pairing and plain NDJSON relay.

@@ -75,9 +75,9 @@ trap cleanup EXIT
 # Deploy-only variables that must NOT be written to the on-device env file.
 _DEPLOY_EXCLUDE='^\s*(NOMON_PI_HOST|NOMON_SSH_KEY|NOMON_GITHUB_REPO|NOMON_SUDO_PASS)\s*='
 
-# ── Load .env ──────────────────────────────────────────────────────────────────
+# ── Load .env.device ──────────────────────────────────────────────────────────
 
-ENV_FILE="${REPO_DIR}/.env"
+ENV_FILE="${REPO_DIR}/.env.device"
 if [[ -f "${ENV_FILE}" ]]; then
     while IFS= read -r line || [[ -n "${line}" ]]; do
         line="${line#"${line%%[![:space:]]*}"}"
@@ -264,7 +264,7 @@ if [[ -n "\${NOMON_SUDO_PASS:-}" ]]; then
 #!/usr/bin/env sh
 printf '%s\n' "\${NOMON_SUDO_PASS}"
 EOSUDOPASS
-    SUDO_ASKPASS="\${_askpass_script}"
+    export SUDO_ASKPASS="\${_askpass_script}"
     trap 'rm -f "\${_askpass_script}"' EXIT
     sudo() { command sudo -A "\$@"; }
 else
@@ -352,7 +352,7 @@ if [[ -n "\${NOMON_SUDO_PASS:-}" ]]; then
 #!/usr/bin/env sh
 printf '%s\n' "\${NOMON_SUDO_PASS}"
 EOSUDOPASS
-    SUDO_ASKPASS="\${_asp}"
+    export SUDO_ASKPASS="\${_asp}"
     trap 'rm -f "\${_asp}"' EXIT
     sudo() { command sudo -A "\$@"; }
 else
@@ -398,7 +398,7 @@ if [[ -n "\${NOMON_SUDO_PASS:-}" ]]; then
 #!/usr/bin/env sh
 printf '%s\n' "\${NOMON_SUDO_PASS}"
 EOSUDOPASS
-    SUDO_ASKPASS="\${_askpass_script}"
+    export SUDO_ASKPASS="\${_askpass_script}"
     trap 'rm -f "\${_askpass_script}"' EXIT
     sudo() { command sudo -A "\$@"; }
 else
@@ -525,10 +525,9 @@ if [[ -f "${REMOTE_TMPFILES}" ]]; then
     sudo systemd-tmpfiles --create /etc/tmpfiles.d/nomon.conf || true
 fi
 
-# Ensure /var/lib/nomon is owned by the service user/group so nomopractic
-# can read the pairing secret file. Use the configured service user/group
-# (defaults on the remote host will be substituted at runtime).
-sudo chown -R "\${NOMON_SERVICE_USER:-root}:\${NOMON_SERVICE_GROUP:-nomon}" /var/lib/nomon || true
+# Ensure /var/lib/nomon is owned by nomon so that the nomothetic service can
+# write the pairing secret and JWT signing secret to this directory.
+sudo chown -R "nomon:\${NOMON_SERVICE_GROUP:-nomon}" /var/lib/nomon || true
 
 # If a config was uploaded, atomically install it to /etc/nomopractic
 if [[ -n "\${REMOTE_CONFIG_TMP}" ]]; then
@@ -697,9 +696,9 @@ else
     sudo chmod 644 /etc/tmpfiles.d/nomon.conf
     sudo systemd-tmpfiles --create /etc/tmpfiles.d/nomon.conf || true
 
-    # Ensure /var/lib/nomon is owned by the service user/group so the
-    # nomopractic process can read the pairing secret file.
-    sudo chown -R "${NOMON_SERVICE_USER:-root}:${NOMON_SERVICE_GROUP:-nomon}" /var/lib/nomon || true
+    # Ensure /var/lib/nomon is owned by nomon so that the nomothetic service
+    # can write the pairing secret and JWT signing secret to this directory.
+    sudo chown -R "nomon:${NOMON_SERVICE_GROUP:-nomon}" /var/lib/nomon || true
 
     sudo systemctl daemon-reload
     sudo systemctl enable  "${SERVICE}"

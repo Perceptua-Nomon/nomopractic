@@ -28,4 +28,4 @@ target
 
 
 # Environment file
-.env
+.env.device
