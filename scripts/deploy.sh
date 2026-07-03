@@ -233,7 +233,7 @@ fi
 _NOMON_SUDO_PASS_QUOTED="$(printf '%q' "${NOMON_SUDO_PASS:-}")"
 copy_nomopractic_env() {
     if [[ ! -f "${ENV_FILE}" ]]; then
-        echo "==> Warning: .env not found; skipping /etc/nomopractic/nomopractic.env creation." >&2
+        echo "==> Warning: .env.device not found; skipping /etc/nomopractic/nomopractic.env creation." >&2
         return
     fi
 
@@ -272,13 +272,18 @@ else
 fi
 sudo mkdir -p /etc/nomopractic
 sudo mv -f /tmp/nomopractic_env.$$ /etc/nomopractic/nomopractic.env
-sudo chmod 644 /etc/nomopractic/nomopractic.env
+# systemd reads EnvironmentFile as root; keep it out of world-readable space.
+sudo chmod 640 /etc/nomopractic/nomopractic.env
+sudo chown root:root /etc/nomopractic/nomopractic.env
 EOCOPYENV
         rm -f "${tmp_env_file}"
     else
         echo "==> Writing /etc/nomopractic/nomopractic.env locally..."
         sudo mkdir -p /etc/nomopractic
         printf '%s\n' "${filtered}" | sudo tee /etc/nomopractic/nomopractic.env > /dev/null
+        # systemd reads EnvironmentFile as root; keep it out of world-readable space.
+        sudo chmod 640 /etc/nomopractic/nomopractic.env
+        sudo chown root:root /etc/nomopractic/nomopractic.env
     fi
 }
 # ── Remote or local installation ─────────────────────────────────────────────
@@ -443,10 +448,11 @@ if ! command -v envsubst >/dev/null 2>&1; then
 fi
 
 # Source on-device env for variable substitution; fall back to script defaults.
+# Read via sudo — the file is root-owned mode 640.
 if [[ -f /etc/nomopractic/nomopractic.env ]]; then
     set -o allexport
-    # shellcheck disable=SC1091
-    source /etc/nomopractic/nomopractic.env
+    # shellcheck disable=SC1090
+    source <(sudo cat /etc/nomopractic/nomopractic.env)
     set +o allexport
 fi
 export NOMON_SERVICE_USER="\${NOMON_SERVICE_USER:-\${_DEF_SVC_USER}}"
@@ -643,10 +649,11 @@ else
     fi
 
     # Source on-device env; fall back to script defaults.
+    # Read via sudo — the file is root-owned mode 640.
     if [[ -f /etc/nomopractic/nomopractic.env ]]; then
         set -o allexport
-        # shellcheck disable=SC1091
-        source /etc/nomopractic/nomopractic.env
+        # shellcheck disable=SC1090
+        source <(sudo cat /etc/nomopractic/nomopractic.env)
         set +o allexport
     fi
     export NOMON_SERVICE_USER="${NOMON_SERVICE_USER:-root}"

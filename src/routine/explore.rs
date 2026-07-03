@@ -19,7 +19,7 @@ use crate::calibration::CalibrationStore;
 use crate::config::Config;
 use crate::hat::gpio::HatGpio;
 use crate::hat::i2c::Hat;
-use crate::hat::servo::{self as servo_hat, LeaseManager};
+use crate::hat::servo::LeaseManager;
 use crate::hat::{adc, motor, servo, ultrasonic};
 
 use super::{ROUTINE_CONN_ID, RoutineStats};
@@ -201,17 +201,7 @@ async fn drive_all(mctx: &MotorContext<'_>, speed_pct: f64) {
             .motors
             .iter()
             .enumerate()
-            .map(|(i, cfg)| {
-                let cal = &guard.motors[i];
-                let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
-                let effective = if scaled.abs() < cal.deadband_pct {
-                    0.0
-                } else {
-                    scaled
-                };
-                let reversed = cal.reversed ^ cfg.reversed;
-                (effective, reversed)
-            })
+            .map(|(i, cfg)| guard.motors[i].apply(speed_pct, cfg.reversed))
             .collect()
     };
 
@@ -258,9 +248,7 @@ async fn steer_channel(
             None => 0,
         }
     };
-    let angle_clamped = angle_deg.clamp(0.0, 180.0);
-    let raw_pulse = servo_hat::angle_to_pulse_us(angle_clamped);
-    let effective_pulse = (raw_pulse as i32 + trim_us as i32).clamp(500, 2500) as u16;
+    let effective_pulse = servo::angle_to_trimmed_pulse_us(angle_deg, trim_us);
     if let Err(e) = servo::set_servo_pulse_us(hat, ch, effective_pulse).await {
         warn!(error = %e, angle_deg, "explore: steer_channel failed");
     }

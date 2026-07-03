@@ -5,7 +5,7 @@
 // Only one routine may run at a time.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -15,7 +15,6 @@ use crate::calibration::CalibrationStore;
 use crate::config::Config;
 use crate::hat::gpio::HatGpio;
 use crate::hat::i2c::Hat;
-use crate::hat::motor;
 use crate::hat::servo::LeaseManager;
 
 /// Pseudo-connection ID for routine-owned motor leases (never a real client ID).
@@ -28,14 +27,6 @@ pub type ActiveRoutineData = (
     Arc<AtomicBool>,
     JoinHandle<(RoutineStats, String)>,
 );
-
-/// Runtime state of the routine engine.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RoutineState {
-    Idle,
-    Running,
-    Stopping,
-}
 
 /// Accumulated statistics from a routine run.
 #[derive(Debug, Clone, Default)]
@@ -52,16 +43,6 @@ pub struct RoutineStatusSnapshot {
     pub elapsed_s: Option<u64>,
     pub obstacles_avoided: Option<u32>,
     pub cliffs_avoided: Option<u32>,
-}
-
-/// Stats returned when a routine stops.
-#[derive(Debug)]
-pub struct RoutineStopResult {
-    pub name: String,
-    pub ran_for_s: u64,
-    pub obstacles_avoided: u32,
-    pub cliffs_avoided: u32,
-    pub stop_reason: String,
 }
 
 struct ActiveRoutine {
@@ -98,11 +79,6 @@ impl RoutineEngine {
             motor_lease_manager,
             active: None,
         }
-    }
-
-    /// Returns `true` if a routine is currently running.
-    pub fn is_running(&self) -> bool {
-        self.active.is_some()
     }
 
     /// Start the named routine, optionally overriding config defaults.
@@ -184,50 +160,6 @@ impl RoutineEngine {
             .map(|a| (a.name, a.started_at, a.stop_flag, a.handle))
     }
 
-    /// Stop the active routine and wait for it to finish (up to 2 s).
-    ///
-    /// On timeout the task is aborted and motors are idled as a safety
-    /// backstop.  Returns `"INVALID_PARAMS"` if no routine is running.
-    pub async fn stop(&mut self) -> Result<RoutineStopResult, &'static str> {
-        let (name, started_at, stop_flag, mut handle) =
-            self.take_active().ok_or("INVALID_PARAMS")?;
-        stop_flag.store(true, Ordering::Relaxed);
-        let ran_for_s = started_at.elapsed().as_secs();
-
-        let (stats, stop_reason) =
-            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => (RoutineStats::default(), "error".to_string()),
-                Err(_timeout) => {
-                    // Timeout — abort the task so it cannot keep running.
-                    handle.abort();
-                    let _ = handle.await;
-                    // Best-effort motor idle as safety backstop.
-                    for cfg in &self.config.motors {
-                        if let Err(e) = motor::idle_motor(&self.hat, cfg.pwm_channel).await {
-                            tracing::warn!(
-                                error = %e,
-                                pwm_channel = cfg.pwm_channel,
-                                "routine stop: SAFETY: failed to idle motor after task abort"
-                            );
-                        }
-                    }
-                    self.motor_lease_manager
-                        .release_connection(ROUTINE_CONN_ID)
-                        .await;
-                    (RoutineStats::default(), "timeout_abort".to_string())
-                }
-            };
-
-        Ok(RoutineStopResult {
-            name,
-            ran_for_s,
-            obstacles_avoided: stats.obstacles_avoided,
-            cliffs_avoided: stats.cliffs_avoided,
-            stop_reason,
-        })
-    }
-
     /// Return a point-in-time snapshot of engine state without affecting it.
     pub fn status(&self) -> RoutineStatusSnapshot {
         match &self.active {
@@ -284,7 +216,6 @@ mod tests {
              avoidance_turn_angle_deg = 60.0\n\
              max_duration_s = 300\n"
         );
-        // Removed duplicate [routine] section write
         let err = crate::config::Config::load(f.path())
             .expect_err("Expected error for out-of-range cliff threshold");
         assert!(

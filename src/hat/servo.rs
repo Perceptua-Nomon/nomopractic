@@ -30,6 +30,13 @@ pub fn angle_to_pulse_us(angle_deg: f64) -> u16 {
     (500.0 + (angle_deg / 180.0) * 2000.0).round() as u16
 }
 
+/// Convert an angle to a pulse width, apply a signed calibration trim, and
+/// clamp the result to the valid 500–2500 µs servo range.
+pub fn angle_to_trimmed_pulse_us(angle_deg: f64, trim_us: i16) -> u16 {
+    let raw = angle_to_pulse_us(angle_deg);
+    (raw as i32 + trim_us as i32).clamp(MIN_PULSE_US as i32, MAX_PULSE_US as i32) as u16
+}
+
 /// Set a PWM channel to a specific pulse width in microseconds.
 ///
 /// Validates that `channel` is 0–11 and `pulse_us` is 500–2500 before writing

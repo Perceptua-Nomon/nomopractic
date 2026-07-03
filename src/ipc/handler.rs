@@ -513,15 +513,8 @@ impl Handler {
     /// and the final direction-reversal flag.
     async fn calibrated_speed(&self, ipc_channel: u8, speed_pct: f64) -> (f64, bool) {
         let cal_guard = self.calibration.lock().await;
-        let cal = &cal_guard.motors[ipc_channel as usize];
-        let scaled = (speed_pct * cal.speed_scale).clamp(-100.0, 100.0);
-        let effective = if scaled.abs() < cal.deadband_pct {
-            0.0
-        } else {
-            scaled
-        };
-        let reversed = cal.reversed ^ self.config.motors[ipc_channel as usize].reversed;
-        (effective, reversed)
+        cal_guard.motors[ipc_channel as usize]
+            .apply(speed_pct, self.config.motors[ipc_channel as usize].reversed)
     }
 
     /// Command one or more motors atomically with rollback on partial failure.
@@ -797,9 +790,7 @@ impl Handler {
                 .unwrap_or(0)
         };
 
-        // Compute raw pulse from angle, then apply trim with 500–2500 µs clamp.
-        let raw_pulse = servo::angle_to_pulse_us(angle_deg);
-        let effective_pulse = (raw_pulse as i32 + trim_us as i32).clamp(500, 2500) as u16;
+        let effective_pulse = servo::angle_to_trimmed_pulse_us(angle_deg, trim_us);
 
         match servo::set_servo_pulse_us(&self.hat, channel, effective_pulse).await {
             Ok(()) => {
