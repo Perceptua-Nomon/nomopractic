@@ -21,6 +21,13 @@ ExecStart=/usr/local/bin/nomopractic --config /etc/nomopractic/config.toml
 Restart=on-failure
 RestartSec=5s
 Environment=RUST_LOG=info
+# Sandboxing — the daemon only needs I2C/GPIO/ALSA device access, the runtime
+# socket dir, and write access to /etc/nomopractic for `save_calibration`.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/nomopractic
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

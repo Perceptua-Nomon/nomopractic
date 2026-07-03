@@ -41,6 +41,26 @@ impl Default for MotorCalibration {
     }
 }
 
+impl MotorCalibration {
+    /// Apply this calibration to a requested speed.
+    ///
+    /// Scales by `speed_scale` (clamped to ±100 %), zeroes the result inside
+    /// the deadband, and XORs the runtime `reversed` flag with the
+    /// wiring-level `config_reversed` flag.
+    ///
+    /// Returns `(effective_speed_pct, reversed)` ready for
+    /// `motor::set_motor_speed`.
+    pub fn apply(&self, speed_pct: f64, config_reversed: bool) -> (f64, bool) {
+        let scaled = (speed_pct * self.speed_scale).clamp(-100.0, 100.0);
+        let effective = if scaled.abs() < self.deadband_pct {
+            0.0
+        } else {
+            scaled
+        };
+        (effective, self.reversed ^ config_reversed)
+    }
+}
+
 /// Raw ADC surface references for one grayscale sensor position.
 ///
 /// `white_raw` is the ADC reading on a white/reflective surface;

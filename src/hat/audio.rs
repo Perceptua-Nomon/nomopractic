@@ -83,6 +83,32 @@ impl AmixerControl {
         }
     }
 
+    /// Run `amixer` with the given arguments (prefixed with `-c <card_index>`
+    /// when set) and return stdout.
+    ///
+    /// On a non-zero exit status the error message is enriched with the list
+    /// of available mixer controls on the card so misconfigured control names
+    /// are immediately diagnosable.
+    fn run_amixer(card_index: Option<u8>, args: &[&str]) -> Result<String, AudioError> {
+        let mut cmd = Command::new("amixer");
+        if let Some(idx) = card_index {
+            cmd.args(["-c", &idx.to_string()]);
+        }
+        cmd.args(args);
+        let out = cmd.output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let available = Self::available_controls(card_index);
+            return Err(AudioError::Command(format!(
+                "{stderr}Available controls on card {}: {available}",
+                card_index
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "(default)".to_string())
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// Parse the current percentage from `amixer get` output.
     ///
     /// Looks for the first `[N%]` token in the output — produced by lines
@@ -108,84 +134,30 @@ impl AmixerControl {
 
 impl AlsaControl for AmixerControl {
     fn get_volume_pct(&self) -> Result<u8, AudioError> {
-        let mut cmd = Command::new("amixer");
-        if let Some(idx) = self.output_card_index {
-            cmd.args(["-c", &idx.to_string()]);
-        }
-        cmd.args(["get", &self.output_control]);
-        let out = cmd.output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.output_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.output_card_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "(default)".to_string())
-            )));
-        }
-        Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
+        let out = Self::run_amixer(self.output_card_index, &["get", &self.output_control])?;
+        Self::parse_pct(&out)
     }
 
     fn set_volume_pct(&self, pct: u8) -> Result<(), AudioError> {
         let pct_arg = format!("{pct}%");
-        let mut cmd = Command::new("amixer");
-        if let Some(idx) = self.output_card_index {
-            cmd.args(["-c", &idx.to_string()]);
-        }
-        cmd.args(["sset", &self.output_control, &pct_arg]);
-        let out = cmd.output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.output_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.output_card_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "(default)".to_string())
-            )));
-        }
+        Self::run_amixer(
+            self.output_card_index,
+            &["sset", &self.output_control, &pct_arg],
+        )?;
         Ok(())
     }
 
     fn get_mic_gain_pct(&self) -> Result<u8, AudioError> {
-        let mut cmd = Command::new("amixer");
-        if let Some(idx) = self.input_card_index {
-            cmd.args(["-c", &idx.to_string()]);
-        }
-        cmd.args(["get", &self.input_control]);
-        let out = cmd.output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.input_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.input_card_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "(default)".to_string())
-            )));
-        }
-        Self::parse_pct(&String::from_utf8_lossy(&out.stdout))
+        let out = Self::run_amixer(self.input_card_index, &["get", &self.input_control])?;
+        Self::parse_pct(&out)
     }
 
     fn set_mic_gain_pct(&self, pct: u8) -> Result<(), AudioError> {
         let pct_arg = format!("{pct}%");
-        let mut cmd = Command::new("amixer");
-        if let Some(idx) = self.input_card_index {
-            cmd.args(["-c", &idx.to_string()]);
-        }
-        cmd.args(["sset", &self.input_control, &pct_arg]);
-        let out = cmd.output()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let available = Self::available_controls(self.input_card_index);
-            return Err(AudioError::Command(format!(
-                "{stderr}Available controls on card {}: {available}",
-                self.input_card_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "(default)".to_string())
-            )));
-        }
+        Self::run_amixer(
+            self.input_card_index,
+            &["sset", &self.input_control, &pct_arg],
+        )?;
         Ok(())
     }
 }
