@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build*)",
+      "Bash(cargo test*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo fmt*)",
+      "Bash(cargo clean*)",
+      "Bash(cross build*)",
+      "Bash(rustup*)",
+      "Bash(make build*)",
+      "Bash(make test*)",
+      "Bash(make lint*)",
+      "Bash(make format*)",
+      "Bash(make check*)",
+      "Bash(make coverage*)",
+      "Bash(make clean*)",
+      "Bash(make release*)",
+      "Bash(ls*)",
+      "Bash(find . *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)"
+    ],
+    "deny": []
+  }
+}
