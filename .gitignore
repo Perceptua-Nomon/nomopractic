@@ -29,3 +29,6 @@ target
 
 # Environment file
 .env.device
+# Claude Code local config
+CLAUDE.md
+.claude/
