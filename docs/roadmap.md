@@ -165,7 +165,7 @@ hardware interaction.
 - [x] Rollback support (keep previous binary as `nomopractic.bak`)
 
 ### 5.3 — Integration Testing on Pi
-- [ ] Integration testing still in progress
+- [x] Integration testing complete (v0.1.0 results below)
 - [x] End-to-end test: start daemon → connect via socket → verify HAT responses
 - [x] Battery voltage sanity check (voltage in expected range)
 - [x] Servo sweep test (0° → 180° → 0°)
@@ -361,7 +361,6 @@ coordinated IPC call. Channel-to-peripheral mappings are defined in
 | 9 | Audio Levels Control | ✅ Complete | 168 |
 | 10 | Calibration & Configuration | ✅ Complete | 206 |
 | 11 | Routine Engine | ✅ Complete | 222 |
-| 12 | Line-Following Routine | 🔲 Planned | — |
 | 13 | BLE GATT Server | ⊘ Superseded by Phase 15 | 278 |
 | 13.1 | BLE Simplification | ⊘ Superseded by Phase 15 | — |
 | 14 | Service Env-File & Deploy Hardening | ✅ Complete | — |
@@ -639,26 +638,6 @@ watchdog idles all motors within `ttl_ms` milliseconds.
 - [x] `cargo test` — 222 tests passing (184 unit + 38 integration)
 - [x] `cargo clippy -- -D warnings` clean
 - [x] `cargo fmt --check` clean
-
----
-
-### Phase 12 — Line-Following Routine (P2)
-
-**Goal**: Add a `follow_line` routine using the grayscale sensors and a
-proportional-derivative (PD) steering controller.
-
-- [ ] `routine/follow_line.rs`: PD control loop
-  - Error signal: weighted sum of grayscale channel values (left/centre/right)
-  - Steer angle: `90° + clamp(Kp × error + Kd × d_error, −45°, +45°)`
-  - Line-lost detection: stop after N consecutive cycles with no dark reading across all channels
-- [ ] `start_routine { name: "follow_line", speed_pct?, kp?, kd?, line_lost_cycles? }` (extended params)
-- [ ] `lines_followed` counter in `RoutineStats`
-- [ ] Unit tests for PD calculation and line-lost logic
-
-#### Phase 12 Exit Criteria
-- [ ] Robot follows a dark line on a light surface autonomously
-- [ ] Stops cleanly when line is lost for > `line_lost_cycles` iterations
-- [ ] All tests pass without hardware
 
 ---
 
